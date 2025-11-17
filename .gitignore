@@ -1,0 +1,9 @@
+# Build output
+dist/
+
+# Node modules folder
+node_modules/
+
+#google credentials
+
+google.json

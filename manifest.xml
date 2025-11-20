@@ -11,6 +11,10 @@
   <SupportUrl DefaultValue="https://www.contoso.com/help"/>
   <AppDomains>
     <AppDomain>https://www.contoso.com</AppDomain>
+    <AppDomain>https://excel-sheets-backend.onrender.com</AppDomain>
+    <AppDomain>https://accounts.google.com</AppDomain>
+    <AppDomain>https://www.googleapis.com</AppDomain>
+    <AppDomain>https://apis.google.com</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Workbook"/>

@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES5",
+    "lib": ["dom", "es5", "scripthost"],
+    "allowJs": true,
+    "noEmitOnError": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": true
+  },
+  "exclude": ["node_modules"]
+}

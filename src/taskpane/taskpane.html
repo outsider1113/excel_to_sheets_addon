@@ -1,55 +1,133 @@
-<!-- Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT License. -->
-<!-- This file shows how to design a first-run page that provides a welcome screen to the user about the features of the add-in. -->
-
 <!DOCTYPE html>
 <html>
-
 <head>
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Contoso Task Pane Add-in</title>
-
-    <!-- Office JavaScript API -->
-    <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-
-    <!-- For more information on Fluent UI, visit https://developer.microsoft.com/fluentui#/. -->
-    <link rel="stylesheet" href="https://static2.sharepointonline.com/files/fabric/office-ui-fabric-core/11.0.0/css/fabric.min.css"/>
-
-    <!-- Template styles -->
-    <link href="taskpane.css" rel="stylesheet" type="text/css" />
+  <meta charset="utf-8" />
+  <title>Excel → Sheets Add-in</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="./taskpane.css" />
 </head>
+<body>
+  <div id="app">
 
-<body class="ms-font-m ms-welcome ms-Fabric">
-    <header class="ms-welcome__header ms-bgColor-neutralLighter">
-        <img width="90" height="90" src="../../assets/logo-filled.png" alt="Contoso" title="Contoso" />
-        <h1 class="ms-font-su">Welcome</h1>
-    </header>
-    <section id="sideload-msg" class="ms-welcome__main">
-        <h2 class="ms-font-xl">Please <a target="_blank" href="https://learn.microsoft.com/office/dev/add-ins/testing/test-debug-office-add-ins#sideload-an-office-add-in-for-testing">sideload</a> your add-in to see app body.</h2>
-    </section>
-    <main id="app-body" class="ms-welcome__main" style="display: none;">
-        <h2 class="ms-font-xl"> Discover what Office Add-ins can do for you today! </h2>
-        <ul class="ms-List ms-welcome__features">
-            <li class="ms-ListItem">
-                <i class="ms-Icon ms-Icon--Ribbon ms-font-xl"></i>
-                <span class="ms-font-m">Achieve more with Office integration</span>
-            </li>
-            <li class="ms-ListItem">
-                <i class="ms-Icon ms-Icon--Unlock ms-font-xl"></i>
-                <span class="ms-font-m">Unlock features and functionality</span>
-            </li>
-            <li class="ms-ListItem">
-                <i class="ms-Icon ms-Icon--Design ms-font-xl"></i>
-                <span class="ms-font-m">Create and visualize like a pro</span>
-            </li>
-        </ul>
-        <p class="ms-font-l">Modify the source files, then click <b>Run</b>.</p>
-        <div role="button" id="run" class="ms-welcome__action ms-Button ms-Button--hero ms-font-xl">
-            <span class="ms-Button-label">Run</span>
+    <!-- SIGN IN PANEL -->
+    <div id="auth-section" class="panel">
+      <button id="googleSignInBtn">Sign in with Google</button>
+      <button id="verifyAuthBtn" style="margin-top:10px;">Verify Sign-In</button>
+      <p id="authStatus" class="status-text"></p>
+    </div>
+
+    <!-- status box for general UI messages (replace alerts) -->
+    <div id="statusBox" class="info-box hidden" role="status" aria-live="polite"></div>
+
+    <!-- MAIN CONTENT (hidden until authenticated) -->
+    <div id="mainContent" class="hidden">
+
+      <!-- CHOOSE SHEETS FILE (required first) -->
+      <div id="chooseSheetPanel" class="panel">
+        <h3>Select Google Sheets file (required)</h3>
+        <button id="reloadSheetsBtn" class="secondary-btn" style="margin-bottom:8px;">Reload Sheets List</button>
+        <select id="modify_sheet_select" style="width:100%;"></select>
+      </div>
+
+      <!-- ACTIVE WORKSHEET STATUS -->
+      <div id="activeSheetBox" class="info-box">
+        <div><strong>Active Excel Worksheet:</strong> <span id="activeSheetName">—</span></div>
+        <div id="sheetChangeWarning" class="warning hidden">
+          Active worksheet changed. Click <button id="refreshActiveSheet" class="secondary-btn small-btn">Refresh</button> to re-sync.
         </div>
-        <p><label id="item-subject"></label></p>
-    </main>
-</body>
+      </div>
 
+      <!-- MODE SELECTOR -->
+      <div id="modeTabs" class="tabs">
+        <button id="tabCreate" class="tab active">Create Workspace</button>
+        <button id="tabModify" class="tab">Modify Existing</button>
+      </div>
+
+      <!-- CREATE WORKSPACE PANEL -->
+      <div id="createPanel" class="panel">
+        <h3>Create New Workspace From Active Excel Tab</h3>
+        <div id="createFormatWarning" class="warning hidden"></div>
+        <div id="createExistsWarning" class="warning hidden"></div>
+
+        <label>Workspace Name (auto-detected from active Excel tab):</label>
+        <input id="create_workspace_name" placeholder="Active worksheet name" />
+
+        <div style="margin-top:8px;">
+          <button id="create_prefill" class="secondary-btn">Read Data From Excel</button>
+        </div>
+
+        <h4>Header Fields (read from Excel)</h4>
+        <div class="field-grid">
+          <label>PURCHASE FROM:</label><input id="c_pf" />
+          <label>DATE RECEIVED:</label><input id="c_dr" />
+          <label>CARRIER:</label><input id="c_carrier" />
+          <label>OUR PO#:</label><input id="c_po" />
+          <label>RECEIVER#:</label><input id="c_rcv" />
+          <label>VERIFIED BY:</label><input id="c_ver" />
+        </div>
+
+        <h4 style="margin-top:10px;">Line Items (multiple rows)</h4>
+        <div class="line-items-header">
+          <span>ITEM NO</span>
+          <span>COMMODITY</span>
+          <span>GROSS</span>
+          <span>TARE</span>
+          <span>COST</span>
+          <span></span>
+        </div>
+        <div id="createLineItemsContainer" class="line-items-container"></div>
+        <button id="create_add_line" type="button" class="secondary-btn small-btn" style="margin-top:6px;">+ Add Line</button>
+
+        <div class="row actions">
+          <button id="create_send" class="primary-btn disabled" disabled>Create & Send to Sheets</button>
+        </div>
+      </div>
+
+      <!-- MODIFY WORKSPACE PANEL -->
+      <div id="modifyPanel" class="panel hidden">
+        <h3>Modify Existing Workspace (Writes from Excel)</h3>
+
+        <label>Select Workspace Tab (from selected Sheets file)</label>
+        <select id="modify_tab_select" style="width:100%; margin-bottom:8px;"></select>
+
+        <div style="margin-bottom:8px;">
+          <button id="modify_prefill" class="secondary-btn">Read Data From Excel (prefill fields)</button>
+        </div>
+
+        <h4>Header Fields (read from Excel)</h4>
+        <div class="field-grid">
+          <label>PURCHASE FROM:</label><input id="m_pf" />
+          <label>DATE RECEIVED:</label><input id="m_dr" />
+          <label>CARRIER:</label><input id="m_carrier" />
+          <label>OUR PO#:</label><input id="m_po" />
+          <label>RECEIVER#:</label><input id="m_rcv" />
+          <label>VERIFIED BY:</label><input id="m_ver" />
+        </div>
+
+        <h4 style="margin-top:10px;">Line Items (multiple rows)</h4>
+        <div class="line-items-header">
+          <span>ITEM NO</span>
+          <span>COMMODITY</span>
+          <span>GROSS</span>
+          <span>TARE</span>
+          <span>COST</span>
+          <span></span>
+        </div>
+        <div id="modifyLineItemsContainer" class="line-items-container"></div>
+        <button id="modify_add_line" type="button" class="secondary-btn small-btn" style="margin-top:6px;">+ Add Line</button>
+
+        <div class="row actions">
+          <button id="modify_send" class="primary-btn disabled" disabled>Send to Sheets</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Office.js must be loaded before taskpane.js -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="taskpane.core.js"></script>
+  <script src="taskpane.workflow.js"></script>
+  <script src="taskpane.js"></script>
+</body>
 </html>

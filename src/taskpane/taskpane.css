@@ -1,80 +1,140 @@
-/* 
- * Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT license.
- * See LICENSE in the project root for license information.
- */
-
- html,
- body {
-     width: 100%;
-     height: 100%;
-     margin: 0;
-     padding: 0;
- }
- 
- ul {
-     margin: 0;
-     padding: 0;
- }
- 
- .ms-welcome__header {
-    padding: 20px;
-    padding-bottom: 30px;
-    padding-top: 100px;
-    display: -webkit-flex;
-    display: flex;
-    -webkit-flex-direction: column;
-    flex-direction: column;
-    align-items: center;
- }
-
- .ms-welcome__main {
-    display: -webkit-flex;
-    display: flex;
-    -webkit-flex-direction: column;
-    flex-direction: column;
-    -webkit-flex-wrap: nowrap;
-    flex-wrap: nowrap;
-    -webkit-align-items: center;
-    align-items: center;
-    -webkit-flex: 1 0 0;
-    flex: 1 0 0;
-    padding: 10px 20px;
- }
- 
- .ms-welcome__main > h2 {
-     width: 100%;
-     text-align: center;
- }
- 
- .ms-welcome__features {
-     list-style-type: none;
-     margin-top: 20px;
- }
- 
- .ms-welcome__features.ms-List .ms-ListItem {
-     padding-bottom: 20px;
-     display: -webkit-flex;
-     display: flex;
- }
- 
- .ms-welcome__features.ms-List .ms-ListItem > .ms-Icon {
-     margin-right: 10px;
- }
- 
- .ms-welcome__action.ms-Button--hero {
-     margin-top: 30px;
- }
- 
-.ms-Button.ms-Button--hero .ms-Button-label {
-  color: #0078d7;
+body {
+    font-family: Arial, sans-serif;
+    padding: 10px;
+    background: #f4f4f4;
 }
 
-.ms-Button.ms-Button--hero:hover .ms-Button-label,
-.ms-Button.ms-Button--hero:focus .ms-Button-label{
-  color: #005a9e;
-  cursor: pointer;
+#app { width: 100%; }
+
+.hidden { display: none !important; }
+
+/* BUTTONS */
+.primary-btn {
+    background: #0078d4;
+    color: white;
+    padding: 10px;
+    border: none;
+    width: 100%;
+    margin-top: 10px;
+    border-radius: 4px;
+}
+.primary-btn.disabled {
+    background: #9bbad1;
+    pointer-events: none;
+    opacity: 0.7;
 }
 
-b {
+.secondary-btn {
+    background: white;
+    border: 1px solid #0078d4;
+    color: #0078d4;
+    padding: 7px;
+    margin: 5px 0;
+    border-radius: 4px;
+}
+.small-btn { padding: 3px 6px; font-size: 12px; }
+
+/* TABS */
+.tabs { display: flex; margin: 10px 0; }
+.tab { flex: 1; padding: 10px; background: #ddd; border: none; cursor: pointer; }
+.tab.active { background: #0078d4; color: white; }
+
+/* PANELS */
+.panel { padding: 10px; background: white; border-radius: 4px; margin-bottom: 12px; }
+
+/* GRID FIELDS */
+.field-grid { display: grid; grid-template-columns: 1fr 1fr; grid-gap: 6px; margin-top: 10px; }
+.field-grid input { width: 100%; padding: 5px; }
+
+/* INFO BOX */
+.info-box { padding: 10px; background: #eef3ff; border-left: 4px solid #0078d4; margin-bottom: 10px; }
+
+.warning { color: #b30000; background: #ffe0e0; padding: 5px; margin-top: 5px; border-radius: 4px; }
+
+.status-msg { margin-top: 10px; font-size: 14px; }
+
+/* google button polish */
+#googleSignInBtn {
+    display: inline-block;
+    background: #fff;
+    color: #444;
+    border: 1px solid #dadce0;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    transition: all 0.15s ease;
+    user-select: none;
+}
+#googleSignInBtn:hover { background: #f7f8f8; border-color: #c6c6c6; }
+#googleSignInBtn:active { background: #e8e8e8; transform: scale(0.98); }
+#verifyAuthBtn { background: #4a90e2; color: white; padding: 10px 16px; border-radius:6px; width:100%; border:none; cursor:pointer; margin-top:8px; }
+#verifyAuthBtn:hover { background:#3c7ac2; }
+
+.status-text { margin-top: 8px; font-size:13px; text-align:center; }
+
+/* status box */
+#statusBox {
+    margin: 8px 0 12px 0;
+    padding: 8px;
+    border-radius: 6px;
+    background: #fff9e6;
+    border-left: 4px solid #ffb84d;
+    color: #6b4a00;
+}
+
+/* row actions */
+.row.actions { display:flex; gap:8px; margin-top:10px; }
+
+/* small visual tweak for inputs */
+input { border: 1px solid #ddd; padding:6px; border-radius:4px; }
+
+/* lock / grey-out entire sections */
+.locked-section {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.lock-note {
+    margin-top: 6px;
+    font-size: 12px;
+}
+
+/* multi-line items layout */
+.line-items-header,
+.line-item-row {
+    display: grid;
+    grid-template-columns: 1.2fr 2fr repeat(3, 1fr) auto;
+    grid-gap: 4px;
+    align-items: center;
+}
+
+.line-items-header {
+    font-size: 11px;
+    text-transform: uppercase;
+    opacity: 0.7;
+    margin-top: 8px;
+}
+
+.line-items-header span {
     font-weight: bold;
+}
+
+.line-items-container {
+    margin-top: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.line-item-row input {
+    width: 100%;
+    padding: 4px;
+}
+
+.line-item-row button {
+    margin-left: 4px;
 }

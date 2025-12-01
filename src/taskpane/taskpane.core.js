@@ -79,6 +79,19 @@ function setSectionLocked(sectionEl, locked) {
   else sectionEl.classList.remove("locked-section");
 }
 
+function setGlobalLoading(isLoading, message) {
+  const overlay = $("globalLoadingOverlay");
+  const msgEl = $("globalLoadingText");
+  if (!overlay || !msgEl) return;
+
+  if (isLoading) {
+    if (message) msgEl.textContent = message;
+    overlay.classList.remove("hidden");
+  } else {
+    overlay.classList.add("hidden");
+  }
+}
+
 // ----------------- RUNTIME STATE -----------------
 
 let pollHandle = null;
@@ -240,8 +253,11 @@ async function onSheetSelected() {
     });
 
     // Evaluate workspace state based on current Excel tab + loaded tabs.
+    // Evaluate workspace state based on current Excel tab + loaded tabs.
     await evaluateWorkspaceState();
+    updateModeBanner();
     updateResyncWarning();
+
 
     // If this Excel tab already has a workspace in Sheets, auto-switch to Modify.
     if (workspaceState.type === "existing" && workspaceState.matchedTab) {
@@ -284,10 +300,12 @@ async function detectActiveWorksheet() {
       if (nameSpan) nameSpan.textContent = currentName;
 
       // Always mirror active Excel tab into the workspace-name field
+      // Always mirror active Excel tab into the workspace-name field
       updateCreateWorkspaceNameFromActive(currentName);
 
       // Re-evaluate workspace existence and warnings on each poll
       await evaluateWorkspaceState();
+      updateModeBanner();
       updateResyncWarning();
       refreshSendButtonsState();
     });
@@ -378,6 +396,48 @@ function findTabByIdentifier(identifier) {
   return null;
 }
 
+
+
+function updateModeBanner() {
+  const banner = $("modeBanner");
+  if (!banner) return;
+
+  const activeName =
+    currentActiveWorksheet ||
+    ($("activeSheetName") ? $("activeSheetName").textContent : "");
+
+  // If we don't know the Excel tab yet or no sheet selected, hide
+  if (!activeName || !selectedSheetId) {
+    banner.className = "mode-banner hidden";
+    banner.querySelector(".text").textContent = "Waiting for Excel tab...";
+    return;
+  }
+
+  const labelEl = banner.querySelector(".label");
+  const textEl = banner.querySelector(".text");
+
+  if (!labelEl || !textEl) return;
+
+  if (workspaceState.type === "title-invalid") {
+    banner.className = "mode-banner invalid";
+    labelEl.textContent = "Mode";
+    textEl.textContent =
+      "Cannot send yet. Rename the Excel tab to include -MM-DD-XXX.";
+  } else if (workspaceState.type === "existing" && workspaceState.matchedTab) {
+    banner.className = "mode-banner modify";
+    labelEl.textContent = "Modifying";
+    textEl.textContent = `Will update existing tab: "${workspaceState.matchedTab}" in Google Sheets.`;
+  } else if (workspaceState.type === "new-valid") {
+    banner.className = "mode-banner create";
+    labelEl.textContent = "Creating";
+    textEl.textContent = `Will create new tab from: "${activeName}" in Google Sheets.`;
+  } else {
+    banner.className = "mode-banner";
+    labelEl.textContent = "Mode";
+    textEl.textContent = "Waiting for workspace status…";
+  }
+}
+
 // Warning about “data read from a different sheet”
 function updateResyncWarning() {
   const warningEl = $("sheetChangeWarning");
@@ -393,15 +453,14 @@ function updateResyncWarning() {
       lastReadCreateSheetName &&
       lastReadCreateSheetName !== currentName) {
     showWarning = true;
-    msg = `Active worksheet is "${currentName}" but Create fields were read from ` +
-          `"${lastReadCreateSheetName}". Please click "Read Data From Excel" (Create) again before sending.`;
+    msg = `Excel sheet changed. Click "Read Data From Excel" again before sending.`;
   } else if (hasAnyModifyData() &&
              lastReadModifySheetName &&
              lastReadModifySheetName !== currentName) {
     showWarning = true;
-    msg = `Active worksheet is "${currentName}" but Modify fields were read from ` +
-          `"${lastReadModifySheetName}". Please click "Read Data From Excel" (Modify) again before sending.`;
+    msg = `Excel sheet changed. Click "Read Data From Excel" again before sending.`;
   }
+
 
   if (showWarning) {
     warningEl.textContent = msg;

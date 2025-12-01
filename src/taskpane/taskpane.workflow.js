@@ -16,7 +16,7 @@ async function readFieldsFromExcel_Create() {
   }
   if (createInFlight) return;
 
-  setStatus("Reading fields from Excel (Create)...");
+  setStatus("Reading Reciever From Excel...");
   try {
     await Excel.run(async (ctx) => {
       const ws = ctx.workbook.worksheets.getActiveWorksheet();
@@ -80,7 +80,7 @@ async function readFieldsFromExcel_Create() {
       renderLineItems("create");
     });
 
-    setStatus("Fields populated from Excel (Create).");
+    setStatus("Fields Copied From Excel. You Can Edit Them Before Sending.");
   } catch (err) {
     console.error(err);
     setStatus("Failed to read Excel fields: " + (err.message || err));
@@ -175,6 +175,95 @@ function isWorkspaceNameFormatValid(name) {
   return ID_RE.test(name.trim());
 }
 
+
+
+// Build payload for /api/updateMasterFromReceiver from UI + in-memory items
+function buildMasterPayloadFromUI(mode) {
+  const isCreate = mode === "create";
+
+  // Header inputs
+  const pfEl       = $(isCreate ? "c_pf"       : "m_pf");
+  const drEl       = $(isCreate ? "c_dr"       : "m_dr");
+  const carrierEl  = $(isCreate ? "c_carrier"  : "m_carrier");
+  const poEl       = $(isCreate ? "c_po"       : "m_po");
+  const rcvEl      = $(isCreate ? "c_rcv"      : "m_rcv");
+  const verEl      = $(isCreate ? "c_ver"      : "m_ver");
+
+  const supplier   = pfEl      ? String(pfEl.value || "").trim()      : "";
+  const date       = drEl      ? String(drEl.value || "").trim()      : "";
+  const carrier    = carrierEl ? String(carrierEl.value || "").trim() : "";
+  const poNumber   = poEl      ? String(poEl.value || "").trim()      : "";
+  const rrNumber   = rcvEl     ? String(rcvEl.value || "").trim()     : "";
+  const verifiedBy = verEl     ? String(verEl.value || "").trim()     : "";
+
+  if (!rrNumber || !poNumber) {
+    // Not enough to meaningfully update Master – let caller decide whether to skip
+    return null;
+  }
+
+  const items = isCreate ? createLineItems : modifyLineItems;
+  const lines = [];
+
+  function parseNumber(val) {
+    if (val == null) return "";
+    const s = String(val).replace(/,/g, "").trim();
+    if (!s) return "";
+    const n = Number(s);
+    return Number.isFinite(n) ? n : "";
+  }
+
+  for (const li of items) {
+    const hasAny =
+      (li.item && li.item.trim().length) ||
+      (li.com && li.com.trim().length) ||
+      (li.gross && li.gross.trim().length) ||
+      (li.tare && li.tare.trim().length) ||
+      (li.cost && li.cost.trim().length);
+
+    if (!hasAny) continue;
+
+    const gross = parseNumber(li.gross);
+    const tare  = parseNumber(li.tare);
+    const net   = (gross !== "" && tare !== "") ? (gross - tare) : "";
+
+    const price = parseNumber(li.cost);
+
+    lines.push({
+      material: li.com || "",
+      materialNotes: "",      // you can populate later if you add a column
+      net: net === "" ? "" : net,
+      price: price === "" ? "" : price,
+      extension: "",          // let Sheets formulas calculate if you want
+      poWeight: ""            // left blank; you adjust in Master
+    });
+  }
+
+  if (!lines.length) {
+    return null;
+  }
+
+  return {
+    sheetId: selectedSheetId,
+    rrNumber,
+    date,
+    supplier,
+    term: "",                 // you can wire these later if you add them to Excel
+    dueDate: "",
+    daysTillDue: "",
+    status: "",
+    datePaid: "",
+    poNumber,
+    poStatus: "",
+    poSageClosed: "",
+    receiverSageEntry: verifiedBy || "",
+    notes: "",                // base notes; carrier will be appended server-side
+    carrier,
+    lines
+  };
+}
+
+
+
 async function createWorkspaceAndSend() {
   if (!selectedSheetId) {
     setStatus("Select a Google Sheets file first.");
@@ -190,34 +279,32 @@ async function createWorkspaceAndSend() {
     return;
   }
   if (!isWorkspaceNameFormatValid(name)) {
-    setStatus("Workspace name must include identifier -MM-DD-XXX (day may be single digit).");
+    setStatus("Excel tab name must include -MM-DD-XXX (e.g. NOVA -1-17-025).");
     return;
   }
   if (workspaceState.type === "existing") {
-    setStatus("A workspace for this Excel tab already exists. Use Modify instead.");
+    setStatus("This receiver already has a workspace in Sheets. Use Modify instead.");
     return;
   }
   if (workspaceState.type === "title-invalid") {
-    setStatus("Excel tab title does not contain -MM-DD-XXX. Fix the title, then try Create again.");
+    setStatus("Rename the Excel tab to include -MM-DD-XXX before sending.");
     return;
   }
   if (!hasAnyCreateData()) {
-    setStatus("Nothing to send. Fill at least one header or line item field.");
+    setStatus("Nothing to send yet. Fill some header or line items first.");
     return;
   }
 
   const currentName = currentActiveWorksheet;
   if (lastReadCreateSheetName && lastReadCreateSheetName !== currentName) {
-    setStatus(
-      `Create data was read from "${lastReadCreateSheetName}" but active sheet is ` +
-      `"${currentName}". Re-read data from Excel before sending.`
-    );
+    setStatus('Excel sheet changed. Click "Read Data From Excel" again before sending.');
     return;
   }
 
   createInFlight = true;
   setButtonEnabled($("create_send"), false);
-  setStatus("Creating workspace (copying template) and sending fields...");
+  setGlobalLoading(true, "Creating new workspace and sending data to Google Sheets…");
+  setStatus("Sending to Google Sheets…");
 
   try {
     const templateName = "CMX METAL NEW TEMPLATE";
@@ -233,7 +320,37 @@ async function createWorkspaceAndSend() {
     const valuesMap = buildValuesMapFromUI("create");
     await writeFieldsToTab(selectedSheetId, name, valuesMap);
 
-    setStatus("Workspace created and initialized.");
+    // Update Master Receivers (create case)
+    const masterPayload = buildMasterPayloadFromUI("create");
+    if (masterPayload) {
+      try {
+        const mrRes = await fetch(`${BACKEND}/api/updateMasterFromReceiver`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(masterPayload)
+        });
+        if (!mrRes.ok) {
+          console.warn("updateMasterFromReceiver (create) failed:", mrRes.status);
+          setStatus(
+            "Workspace created, but Master Receivers update failed (" +
+            mrRes.status +
+            ")."
+          );
+        } else {
+          setStatus("Done: created new workspace and updated Master Receivers.");
+        }
+      } catch (e) {
+        console.warn("updateMasterFromReceiver (create) error:", e);
+        setStatus(
+          "Workspace created, but Master Receivers update errored: " +
+          (e.message || e)
+        );
+      }
+    } else {
+      setStatus("Workspace created (Master not updated: missing RR#/PO#/lines).");
+    }
+
     // refresh tabs & workspace state
     await onSheetSelected();
   } catch (err) {
@@ -241,6 +358,7 @@ async function createWorkspaceAndSend() {
     setStatus("Create failed: " + (err.message || err));
   } finally {
     createInFlight = false;
+    setGlobalLoading(false);
     refreshSendButtonsState();
   }
 }
@@ -252,39 +370,73 @@ async function modifySendToSheets() {
   }
   const tabName = $("modify_tab_select").value;
   if (!tabName) {
-    setStatus("Select a workspace tab to modify.");
+    setStatus("Choose which workspace tab to update.");
     return;
   }
   if (!hasAnyModifyData()) {
-    setStatus("Nothing to send. Fill at least one header or line item field.");
+    setStatus("Nothing to send yet. Fill some header or line items first.");
     return;
   }
   const currentName = currentActiveWorksheet;
   if (lastReadModifySheetName && lastReadModifySheetName !== currentName) {
-    setStatus(
-      `Modify data was read from "${lastReadModifySheetName}" but active sheet is ` +
-      `"${currentName}". Re-read data from Excel before sending.`
-    );
+    setStatus('Excel sheet changed. Click "Read Data From Excel" again before sending.');
     return;
   }
   if (modifyInFlight) return;
 
   modifyInFlight = true;
   setButtonEnabled($("modify_send"), false);
-  setStatus("Writing values to Sheets...");
+  setGlobalLoading(true, "Updating existing workspace in Google Sheets…");
+  setStatus("Sending updates to Google Sheets…");
 
   try {
     const valuesMap = buildValuesMapFromUI("modify");
     await writeFieldsToTab(selectedSheetId, tabName, valuesMap);
-    setStatus("Updated Sheets tab: " + tabName);
+
+    // Update Master Receivers (modify case)
+    const masterPayload = buildMasterPayloadFromUI("modify");
+    if (masterPayload) {
+      try {
+        const mrRes = await fetch(`${BACKEND}/api/updateMasterFromReceiver`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(masterPayload)
+        });
+        if (!mrRes.ok) {
+          console.warn("updateMasterFromReceiver (modify) failed:", mrRes.status);
+          setStatus(
+            "Workspace updated, but Master Receivers update failed (" +
+            mrRes.status +
+            ")."
+          );
+        } else {
+          setStatus(
+            "Done: updated workspace and Master Receivers for RR#: " +
+            masterPayload.rrNumber +
+            "."
+          );
+        }
+      } catch (e) {
+        console.warn("updateMasterFromReceiver (modify) error:", e);
+        setStatus(
+          "Workspace updated, but Master Receivers update errored: " +
+          (e.message || e)
+        );
+      }
+    } else {
+      setStatus("Workspace updated (Master not updated: missing RR#/PO#/lines).");
+    }
   } catch (err) {
     console.error(err);
     setStatus("Write failed: " + (err.message || err));
   } finally {
     modifyInFlight = false;
+    setGlobalLoading(false);
     refreshSendButtonsState();
   }
 }
+
 
 // ----------------- BUTTON STATE / LOCK-OUT LOGIC -----------------
 

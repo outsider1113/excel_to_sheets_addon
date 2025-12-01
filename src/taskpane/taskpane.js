@@ -72,3 +72,6 @@ Office.onReady(() => {
     2000
   );
 });
+
+
+//For scripting add in two files into the excel sheet and then aggregate them over time the

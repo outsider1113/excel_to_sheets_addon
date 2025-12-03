@@ -1,0 +1,1210 @@
+From 586f34dcb9b273dfda0f8151eb5371f6de3b60ea Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 3 Dec 2025 18:27:50 +0000
+Subject: [PATCH] Refine send workflow with modal review and note parsing
+
+## Summary
+- replace the modify tab with a single send panel that launches a confirmation modal and blocks on worksheet changes
+- add parsing for parenthetical material notes into column O and skip master updates for lines without item codes
+- enforce item-code requirements for GENERATED lines while leaving net term fields unchanged for sheet-side formulas
+
+## Testing
+- not run (not requested)
+---
+ src/taskpane/taskpane.core.js     | 130 ++++-----
+ src/taskpane/taskpane.css         |  68 +++--
+ src/taskpane/taskpane.html        |  55 +---
+ src/taskpane/taskpane.js          |  51 +---
+ src/taskpane/taskpane.workflow.js | 451 ++++++++++++------------------
+ 5 files changed, 312 insertions(+), 443 deletions(-)
+
+diff --git a/src/taskpane/taskpane.core.js b/src/taskpane/taskpane.core.js
+index 913dd14..7cf6dba 100644
+--- a/src/taskpane/taskpane.core.js
++++ b/src/taskpane/taskpane.core.js
+@@ -34,7 +34,8 @@ const ITEM_COLUMNS = {
+   com:   "B",    // COMMODITY
+   gross: "C",    // GROSS
+   tare:  "D",    // TARE
+-  cost:  "F"     // COST
++  cost:  "F",    // COST
++  notes: "O"     // MATERIAL NOTES
+ };
+ const LINE_KEYS = ["item", "com", "gross", "tare", "cost"];
+ 
+@@ -102,10 +103,10 @@ let selectedSheetId = null;
+ let currentTabs = [];   // tab titles for selected sheet
+ 
+ let currentActiveWorksheet = null;
++let lastDetectedWorksheet = null;
+ 
+-// Which sheet did we read fields from last, per mode?
++// Which sheet did we read fields from last?
+ let lastReadCreateSheetName = null;
+-let lastReadModifySheetName = null;
+ 
+ let workspaceState = {
+   type: "unknown",      // "existing" | "new-valid" | "title-invalid" | "unknown"
+@@ -114,11 +115,10 @@ let workspaceState = {
+ };
+ 
+ let createInFlight = false;
+-let modifyInFlight = false;
++let sendInFlight = false;
+ 
+ // dynamic line items (arrays of { item, com, gross, tare, cost })
+ let createLineItems = [];
+-let modifyLineItems = [];
+ 
+ // ----------------- AUTH / SHEETS -----------------
+ 
+@@ -215,15 +215,12 @@ function populateSheetsSelect() {
+ 
+ async function onSheetSelected() {
+   selectedSheetId = $("modify_sheet_select").value || null;
+-  const tabSel = $("modify_tab_select");
+-  tabSel.innerHTML = "<option value=''>— choose tab —</option>";
+   currentTabs = [];
+   workspaceState = { type: "unknown", identifier: null, matchedTab: null };
+ 
+   if (!selectedSheetId) {
+     setStatus("Select a Google Sheets file to continue.");
+     setSectionLocked($("createPanel"), true);
+-    setSectionLocked($("modifyPanel"), true);
+     refreshSendButtonsState();
+     return;
+   }
+@@ -244,38 +241,23 @@ async function onSheetSelected() {
+       (t.properties && t.properties.title) ? t.properties.title : (t.title || t)
+     );
+ 
+-    tabSel.innerHTML = "<option value=''>— choose tab —</option>";
+-    currentTabs.forEach(t => {
+-      const o = document.createElement("option");
+-      o.value = t;
+-      o.textContent = t;
+-      tabSel.appendChild(o);
+-    });
+-
+-    // Evaluate workspace state based on current Excel tab + loaded tabs.
+-    // Evaluate workspace state based on current Excel tab + loaded tabs.
+     await evaluateWorkspaceState();
+     updateModeBanner();
+     updateResyncWarning();
+ 
+-
+-    // If this Excel tab already has a workspace in Sheets, auto-switch to Modify.
+     if (workspaceState.type === "existing" && workspaceState.matchedTab) {
+-      $("modify_tab_select").value = workspaceState.matchedTab;
+-      switchMode("modify");
+       setStatus(
+         `Workspace for this Excel tab already exists as "${workspaceState.matchedTab}". ` +
+-        "Create is locked. Use Modify instead."
++        "Sending will update that tab."
+       );
+     } else if (workspaceState.type === "title-invalid") {
+       // evaluateWorkspaceState already set a detailed message about title format.
+     } else {
+-      setStatus("Tabs loaded. Choose Create or Modify.");
++      setStatus("Tabs loaded. Ready to read from Excel.");
+     }
+ 
+-    // Sections are now unlocked (but buttons still controlled by refreshSendButtonsState)
++    // Section is now unlocked (but buttons still controlled by refreshSendButtonsState)
+     setSectionLocked($("createPanel"), false);
+-    setSectionLocked($("modifyPanel"), false);
+   } catch (err) {
+     console.error(err);
+     setStatus("Error loading tabs: " + (err.message || err));
+@@ -286,7 +268,8 @@ async function onSheetSelected() {
+ 
+ // ----------------- ACTIVE WORKSHEET TRACKING -----------------
+ 
+-async function detectActiveWorksheet() {
++async function detectActiveWorksheet(forceOverlay = false) {
++  let showLoader = false;
+   try {
+     await Excel.run(async (ctx) => {
+       const ws = ctx.workbook.worksheets.getActiveWorksheet();
+@@ -294,12 +277,18 @@ async function detectActiveWorksheet() {
+       await ctx.sync();
+ 
+       const currentName = ws.name || "";
++      const tabChanged = currentName !== lastDetectedWorksheet;
++      if (forceOverlay || tabChanged) {
++        setGlobalLoading(true, "Updating for active Excel tab...");
++        showLoader = true;
++      }
++
+       currentActiveWorksheet = currentName;
++      lastDetectedWorksheet = currentName;
+ 
+       const nameSpan = $("activeSheetName");
+       if (nameSpan) nameSpan.textContent = currentName;
+ 
+-      // Always mirror active Excel tab into the workspace-name field
+       // Always mirror active Excel tab into the workspace-name field
+       updateCreateWorkspaceNameFromActive(currentName);
+ 
+@@ -311,6 +300,8 @@ async function detectActiveWorksheet() {
+     });
+   } catch (err) {
+     console.warn("detectActiveWorksheet error", err);
++  } finally {
++    if (showLoader) setGlobalLoading(false);
+   }
+ }
+ 
+@@ -396,6 +387,32 @@ function findTabByIdentifier(identifier) {
+   return null;
+ }
+ 
++// Normalize commodity text, capture any parenthetical notes, and detect GENERATED prefix
++function parseCommodityForNotes(raw) {
++  const result = { material: "", note: "", isGenerated: false };
++  if (raw == null) return result;
++
++  let text = String(raw).trim();
++  const genMatch = text.match(/^\s*generated\s*:\s*(.*)$/i);
++  if (genMatch) {
++    result.isGenerated = true;
++    text = genMatch[1].trim();
++  }
++
++  const noteParts = [];
++  text = text.replace(/\(([^)]*)\)/g, (_, inner) => {
++    if (inner && inner.trim()) noteParts.push(inner.trim());
++    return " ";
++  });
++
++  result.material = text.replace(/\s+/g, " ").trim();
++  if (noteParts.length) {
++    result.note = noteParts.join("; ");
++  }
++
++  return result;
++}
++
+ 
+ 
+ function updateModeBanner() {
+@@ -454,11 +471,6 @@ function updateResyncWarning() {
+       lastReadCreateSheetName !== currentName) {
+     showWarning = true;
+     msg = `Excel sheet changed. Click "Read Data From Excel" again before sending.`;
+-  } else if (hasAnyModifyData() &&
+-             lastReadModifySheetName &&
+-             lastReadModifySheetName !== currentName) {
+-    showWarning = true;
+-    msg = `Excel sheet changed. Click "Read Data From Excel" again before sending.`;
+   }
+ 
+ 
+@@ -473,18 +485,15 @@ function updateResyncWarning() {
+ 
+ // ----------------- MULTI-ROW LINE ITEMS HELPERS -----------------
+ 
+-function addLineItem(mode) {
+-  const isCreate = mode === "create";
+-  const items = isCreate ? createLineItems : modifyLineItems;
+-  items.push({ item: "", com: "", gross: "", tare: "", cost: "" });
+-  renderLineItems(mode);
++function addLineItem() {
++  createLineItems.push({ item: "", com: "", gross: "", tare: "", cost: "" });
++  renderLineItems();
+   refreshSendButtonsState();
+ }
+ 
+-function renderLineItems(mode) {
+-  const isCreate = mode === "create";
+-  const container = isCreate ? $("createLineItemsContainer") : $("modifyLineItemsContainer");
+-  const items = isCreate ? createLineItems : modifyLineItems;
++function renderLineItems() {
++  const container = $("createLineItemsContainer");
++  const items = createLineItems;
+ 
+   if (!container) return;
+   container.innerHTML = "";
+@@ -518,7 +527,7 @@ function renderLineItems(mode) {
+     removeBtn.textContent = "×";
+     removeBtn.addEventListener("click", () => {
+       items.splice(idx, 1);
+-      renderLineItems(mode);
++      renderLineItems();
+       refreshSendButtonsState();
+     });
+     row.appendChild(removeBtn);
+@@ -529,21 +538,17 @@ function renderLineItems(mode) {
+ 
+ // ----------------- BUILD VALUES MAP FROM UI -----------------
+ 
+-function buildValuesMapFromUI(mode) {
+-  const isCreate = mode === "create";
+-
++function buildValuesMapFromUI() {
+   const valuesMap = {};
+ 
+   // headers
+   HEADER_FIELDS.forEach(h => {
+-    const id = isCreate ? h.cId : h.mId;
+-    const el = $(id);
++    const el = $(h.cId);
+     valuesMap[h.cell] = el ? el.value || "" : "";
+   });
+ 
+   // line items
+-  const items = isCreate ? createLineItems : modifyLineItems;
+-  items.forEach((li, idx) => {
++  createLineItems.forEach((li, idx) => {
+     const row = ITEM_START_ROW + idx;
+     const any =
+       (li.item && li.item.trim().length) ||
+@@ -554,11 +559,17 @@ function buildValuesMapFromUI(mode) {
+ 
+     if (!any) return;
+ 
++    const parsed = parseCommodityForNotes(li.com);
++
+     valuesMap[`${ITEM_COLUMNS.item}${row}`]  = li.item  || "";
+-    valuesMap[`${ITEM_COLUMNS.com}${row}`]   = li.com   || "";
++    valuesMap[`${ITEM_COLUMNS.com}${row}`]   = parsed.material || li.com || "";
+     valuesMap[`${ITEM_COLUMNS.gross}${row}`] = li.gross || "";
+     valuesMap[`${ITEM_COLUMNS.tare}${row}`]  = li.tare  || "";
+     valuesMap[`${ITEM_COLUMNS.cost}${row}`]  = li.cost  || "";
++
++    if (parsed.note) {
++      valuesMap[`${ITEM_COLUMNS.notes}${row}`] = parsed.note;
++    }
+   });
+ 
+   return valuesMap;
+@@ -601,19 +612,16 @@ async function writeFieldsToTab(sheetId, tabName, valuesMap) {
+ 
+ // ----------------- “HAS DATA” HELPERS -----------------
+ 
+-function hasAnyHeaderValues(prefix) {
+-  // prefix: "c_" or "m_"
++function hasAnyHeaderValues() {
+   for (const h of HEADER_FIELDS) {
+-    const id = prefix === "c_" ? h.cId : h.mId;
+-    const el = $(id);
++    const el = $(h.cId);
+     if (el && String(el.value || "").trim().length) return true;
+   }
+   return false;
+ }
+ 
+-function hasAnyLineItems(mode) {
+-  const items = mode === "create" ? createLineItems : modifyLineItems;
+-  return items.some(li => {
++function hasAnyLineItems() {
++  return createLineItems.some(li => {
+     return (
+       (li.item && li.item.trim().length) ||
+       (li.com && li.com.trim().length) ||
+@@ -625,9 +633,5 @@ function hasAnyLineItems(mode) {
+ }
+ 
+ function hasAnyCreateData() {
+-  return hasAnyHeaderValues("c_") || hasAnyLineItems("create");
+-}
+-
+-function hasAnyModifyData() {
+-  return hasAnyHeaderValues("m_") || hasAnyLineItems("modify");
++  return hasAnyHeaderValues() || hasAnyLineItems();
+ }
+diff --git a/src/taskpane/taskpane.css b/src/taskpane/taskpane.css
+index 29819c4..9620f22 100644
+--- a/src/taskpane/taskpane.css
++++ b/src/taskpane/taskpane.css
+@@ -143,33 +143,6 @@ button {
+ }
+ 
+ /* TABS */
+-.tabs {
+-  display: flex;
+-  margin: 10px 0;
+-  padding: 2px;
+-  background: #e5ebf7;
+-  border-radius: 999px;
+-}
+-
+-.tab {
+-  flex: 1;
+-  padding: 8px 6px;
+-  background: transparent;
+-  border: none;
+-  border-radius: 999px;
+-  cursor: pointer;
+-  font-size: 12px;
+-  font-weight: 500;
+-  color: #4b5563;
+-  transition: background 0.1s ease, color 0.1s ease;
+-}
+-
+-.tab.active {
+-  background: #ffffff;
+-  color: #1d4ed8;
+-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+-}
+-
+ /* GRID FIELDS */
+ .field-grid {
+   display: grid;
+@@ -392,6 +365,47 @@ input {
+   color: #111827;
+ }
+ 
++/* ACTION MODAL */
++.modal {
++  position: fixed;
++  inset: 0;
++  background: rgba(15, 23, 42, 0.35);
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  z-index: 10000;
++}
++
++.modal.hidden {
++  display: none !important;
++}
++
++.modal-card {
++  background: #ffffff;
++  padding: 16px 18px;
++  border-radius: 12px;
++  max-width: 360px;
++  width: calc(100% - 24px);
++  box-shadow: 0 14px 40px rgba(15, 23, 42, 0.35);
++}
++
++.modal-card h3 {
++  margin-top: 0;
++  margin-bottom: 6px;
++}
++
++.modal-card p {
++  font-size: 13px;
++  color: #374151;
++}
++
++.modal-actions {
++  display: flex;
++  justify-content: flex-end;
++  gap: 10px;
++  margin-top: 12px;
++}
++
+ /* Simple spinner */
+ .spinner {
+   width: 16px;
+diff --git a/src/taskpane/taskpane.html b/src/taskpane/taskpane.html
+index 7166a23..ea5b402 100644
+--- a/src/taskpane/taskpane.html
++++ b/src/taskpane/taskpane.html
+@@ -44,14 +44,8 @@
+       </div>
+ 
+       <!-- MODE SELECTOR -->
+-      <div id="modeTabs" class="tabs">
+-        <button id="tabCreate" class="tab active">Create Workspace</button>
+-        <button id="tabModify" class="tab">Modify Existing</button>
+-      </div>
+-
+-      <!-- CREATE WORKSPACE PANEL -->
+       <div id="createPanel" class="panel">
+-        <h3>Create New Workspace From Active Excel Tab</h3>
++        <h3>Send Active Excel Tab To Google Sheets</h3>
+         <div id="createFormatWarning" class="warning hidden"></div>
+         <div id="createExistsWarning" class="warning hidden"></div>
+ 
+@@ -85,48 +79,21 @@
+         <button id="create_add_line" type="button" class="secondary-btn small-btn" style="margin-top:6px;">+ Add Line</button>
+ 
+         <div class="row actions">
+-          <button id="create_send" class="primary-btn disabled" disabled>Create & Send to Sheets</button>
++          <button id="create_send" class="primary-btn disabled" disabled>Review & Send to Sheets</button>
+         </div>
+       </div>
+ 
+-      <!-- MODIFY WORKSPACE PANEL -->
+-      <div id="modifyPanel" class="panel hidden">
+-        <h3>Modify Existing Workspace (Writes from Excel)</h3>
+-
+-        <label>Select Workspace Tab (from selected Sheets file)</label>
+-        <select id="modify_tab_select" style="width:100%; margin-bottom:8px;"></select>
+-
+-        <div style="margin-bottom:8px;">
+-          <button id="modify_prefill" class="secondary-btn">Read Data From Excel (prefill fields)</button>
+-        </div>
+-
+-        <h4>Header Fields (read from Excel)</h4>
+-        <div class="field-grid">
+-          <label>PURCHASE FROM:</label><input id="m_pf" />
+-          <label>DATE RECEIVED:</label><input id="m_dr" />
+-          <label>CARRIER:</label><input id="m_carrier" />
+-          <label>OUR PO#:</label><input id="m_po" />
+-          <label>RECEIVER#:</label><input id="m_rcv" />
+-          <label>VERIFIED BY:</label><input id="m_ver" />
+-        </div>
+-
+-        <h4 style="margin-top:10px;">Line Items (multiple rows)</h4>
+-        <div class="line-items-header">
+-          <span>ITEM NO</span>
+-          <span>COMMODITY</span>
+-          <span>GROSS</span>
+-          <span>TARE</span>
+-          <span>COST</span>
+-          <span></span>
+-        </div>
+-        <div id="modifyLineItemsContainer" class="line-items-container"></div>
+-        <button id="modify_add_line" type="button" class="secondary-btn small-btn" style="margin-top:6px;">+ Add Line</button>
++    </div>
++  </div>
+ 
+-        <div class="row actions">
+-          <button id="modify_send" class="primary-btn disabled" disabled>Send to Sheets</button>
+-        </div>
++  <div id="actionModal" class="modal hidden" role="dialog" aria-modal="true">
++    <div class="modal-card">
++      <h3 id="actionModalTitle">Review action</h3>
++      <p id="actionModalBody"></p>
++      <div class="modal-actions">
++        <button id="actionModalCancel" class="secondary-btn" type="button">Cancel</button>
++        <button id="actionModalConfirm" class="primary-btn" type="button">Continue</button>
+       </div>
+-
+     </div>
+   </div>
+ 
+diff --git a/src/taskpane/taskpane.js b/src/taskpane/taskpane.js
+index 606da4f..a36d910 100644
+--- a/src/taskpane/taskpane.js
++++ b/src/taskpane/taskpane.js
+@@ -1,30 +1,11 @@
+ /* global Office */
+ /*
+   Main entrypoint:
+-  - defines switchMode
+   - wires up DOM events in Office.onReady
+-  - starts active worksheet polling
++  - starts active worksheet polling with blocking overlay on tab changes
++  - routes send button to review modal handled in workflow.js
+ */
+ 
+-// ----------------- MODE SWITCHING -----------------
+-
+-function switchMode(mode) {
+-  if (mode === "create") {
+-    $("tabCreate").classList.add("active");
+-    $("tabModify").classList.remove("active");
+-    show($("createPanel"));
+-    hide($("modifyPanel"));
+-  } else {
+-    $("tabModify").classList.add("active");
+-    $("tabCreate").classList.remove("active");
+-    show($("modifyPanel"));
+-    hide($("createPanel"));
+-  }
+-  refreshSendButtonsState();
+-}
+-
+-// ----------------- INIT / EVENT WIRING -----------------
+-
+ Office.onReady(() => {
+   // auth
+   $("googleSignInBtn").addEventListener("click", openAuthDialog);
+@@ -34,30 +15,21 @@ Office.onReady(() => {
+   $("reloadSheetsBtn").addEventListener("click", loadSheets);
+   $("modify_sheet_select").addEventListener("change", onSheetSelected);
+ 
+-  // mode tabs
+-  $("tabCreate").addEventListener("click", () => switchMode("create"));
+-  $("tabModify").addEventListener("click", () => switchMode("modify"));
+-
+   // create panel
+   $("create_prefill").addEventListener("click", readFieldsFromExcel_Create);
+-  $("create_send").addEventListener("click", createWorkspaceAndSend);
+-  $("create_add_line").addEventListener("click", () => addLineItem("create"));
+-  $("create_workspace_name").addEventListener("input", () => {
+-    // Only affects format validation; existence is based on Excel tab id.
+-    refreshSendButtonsState();
+-  });
++  $("create_send").addEventListener("click", openSendReviewModal);
++  $("create_add_line").addEventListener("click", () => addLineItem());
++  $("create_workspace_name").addEventListener("input", refreshSendButtonsState);
+ 
+-  // modify panel
+-  $("modify_prefill").addEventListener("click", readFieldsFromExcel_Modify);
+-  $("modify_send").addEventListener("click", modifySendToSheets);
+-  $("modify_add_line").addEventListener("click", () => addLineItem("modify"));
+-  $("modify_tab_select").addEventListener("change", refreshSendButtonsState);
++  // modal actions
++  $("actionModalCancel").addEventListener("click", closeActionModal);
++  $("actionModalConfirm").addEventListener("click", confirmPendingSend);
+ 
+   // Optional manual refresh button – still works as a quick resync
+   const refreshBtn = $("refreshActiveSheet");
+   if (refreshBtn) {
+     refreshBtn.addEventListener("click", async () => {
+-      await detectActiveWorksheet();
++      await detectActiveWorksheet(true);
+       refreshSendButtonsState();
+     });
+   }
+@@ -66,12 +38,9 @@ Office.onReady(() => {
+   setStatus("Please sign in to continue.");
+ 
+   // initial detect and polling for changes
+-  detectActiveWorksheet().catch(err => console.warn("initial detect error", err));
++  detectActiveWorksheet(true).catch(err => console.warn("initial detect error", err));
+   pollHandle = setInterval(
+     () => detectActiveWorksheet().catch(err => console.warn("poll err", err)),
+     2000
+   );
+ });
+-
+-
+-//For scripting add in two files into the excel sheet and then aggregate them over time the
+\ No newline at end of file
+diff --git a/src/taskpane/taskpane.workflow.js b/src/taskpane/taskpane.workflow.js
+index 05ef896..ac580bf 100644
+--- a/src/taskpane/taskpane.workflow.js
++++ b/src/taskpane/taskpane.workflow.js
+@@ -1,12 +1,14 @@
+ /* global Excel */
+ /*
+   Workflow layer:
+-  - read from Excel for Create / Modify
+-  - create / modify workspace flows
++  - read from Excel for the active worksheet
++  - orchestrate create/modify based on detected workspace state
+   - workspace name validation
+   - button enable / lock-out logic
+ */
+ 
++let pendingSendPlan = null;
++
+ // ----------------- READ FROM EXCEL -----------------
+ 
+ async function readFieldsFromExcel_Create() {
+@@ -16,6 +18,8 @@ async function readFieldsFromExcel_Create() {
+   }
+   if (createInFlight) return;
+ 
++  createInFlight = true;
++
+   setStatus("Reading Reciever From Excel...");
+   try {
+     await Excel.run(async (ctx) => {
+@@ -77,7 +81,7 @@ async function readFieldsFromExcel_Create() {
+         }
+       }
+ 
+-      renderLineItems("create");
++        renderLineItems();
+     });
+ 
+     setStatus("Fields Copied From Excel. You Can Edit Them Before Sending.");
+@@ -85,84 +89,7 @@ async function readFieldsFromExcel_Create() {
+     console.error(err);
+     setStatus("Failed to read Excel fields: " + (err.message || err));
+   } finally {
+-    updateResyncWarning();
+-    refreshSendButtonsState();
+-  }
+-}
+-
+-async function readFieldsFromExcel_Modify() {
+-  if (!selectedSheetId) {
+-    setStatus("Select a Google Sheets file first.");
+-    return;
+-  }
+-  if (modifyInFlight) return;
+-
+-  setStatus("Reading fields from Excel (Modify)...");
+-  try {
+-    await Excel.run(async (ctx) => {
+-      const ws = ctx.workbook.worksheets.getActiveWorksheet();
+-      ws.load("name");
+-      // Header cells
+-      const headerRanges = {};
+-      HEADER_FIELDS.forEach(h => {
+-        const rng = ws.getRange(h.cell);
+-        rng.load("values");
+-        headerRanges[h.key] = rng;
+-      });
+-
+-      // Line items
+-      const endRow = ITEM_START_ROW + MAX_LINE_ITEMS - 1;
+-      const lineRange = ws.getRange(`A${ITEM_START_ROW}:F${endRow}`);
+-      lineRange.load("values");
+-
+-      await ctx.sync();
+-
+-      HEADER_FIELDS.forEach(h => {
+-        const el = $(h.mId);
+-        const rng = headerRanges[h.key];
+-        const v = rng && rng.values && rng.values[0] ? rng.values[0][0] : "";
+-        if (el) el.value = v == null ? "" : String(v);
+-      });
+-
+-      // Track where Modify values came from
+-      lastReadModifySheetName = ws.name || "";
+-
+-      modifyLineItems = [];
+-      const values = lineRange.values || [];
+-      for (let i = 0; i < values.length; i++) {
+-        const row = values[i] || [];
+-        const itemVal  = row[0];
+-        const comVal   = row[1];
+-        const grossVal = row[2];
+-        const tareVal  = row[3];
+-        const costVal  = row[5];
+-
+-        const any =
+-          (itemVal && String(itemVal).trim().length) ||
+-          (comVal && String(comVal).trim().length) ||
+-          (grossVal && String(grossVal).trim().length) ||
+-          (tareVal && String(tareVal).trim().length) ||
+-          (costVal && String(costVal).trim().length);
+-
+-        if (any) {
+-          modifyLineItems.push({
+-            item:  itemVal  == null ? "" : String(itemVal),
+-            com:   comVal   == null ? "" : String(comVal),
+-            gross: grossVal == null ? "" : String(grossVal),
+-            tare:  tareVal  == null ? "" : String(tareVal),
+-            cost:  costVal  == null ? "" : String(costVal)
+-          });
+-        }
+-      }
+-
+-      renderLineItems("modify");
+-    });
+-
+-    setStatus("Fields populated from Excel (Modify).");
+-  } catch (err) {
+-    console.error(err);
+-    setStatus("Failed to read Excel fields: " + (err.message || err));
+-  } finally {
++    createInFlight = false;
+     updateResyncWarning();
+     refreshSendButtonsState();
+   }
+@@ -178,16 +105,14 @@ function isWorkspaceNameFormatValid(name) {
+ 
+ 
+ // Build payload for /api/updateMasterFromReceiver from UI + in-memory items
+-function buildMasterPayloadFromUI(mode) {
+-  const isCreate = mode === "create";
+-
++function buildMasterPayloadFromUI() {
+   // Header inputs
+-  const pfEl       = $(isCreate ? "c_pf"       : "m_pf");
+-  const drEl       = $(isCreate ? "c_dr"       : "m_dr");
+-  const carrierEl  = $(isCreate ? "c_carrier"  : "m_carrier");
+-  const poEl       = $(isCreate ? "c_po"       : "m_po");
+-  const rcvEl      = $(isCreate ? "c_rcv"      : "m_rcv");
+-  const verEl      = $(isCreate ? "c_ver"      : "m_ver");
++  const pfEl       = $("c_pf");
++  const drEl       = $("c_dr");
++  const carrierEl  = $("c_carrier");
++  const poEl       = $("c_po");
++  const rcvEl      = $("c_rcv");
++  const verEl      = $("c_ver");
+ 
+   const supplier   = pfEl      ? String(pfEl.value || "").trim()      : "";
+   const date       = drEl      ? String(drEl.value || "").trim()      : "";
+@@ -198,11 +123,11 @@ function buildMasterPayloadFromUI(mode) {
+ 
+   if (!rrNumber || !poNumber) {
+     // Not enough to meaningfully update Master – let caller decide whether to skip
+-    return null;
++    return { payload: null, error: null };
+   }
+ 
+-  const items = isCreate ? createLineItems : modifyLineItems;
+   const lines = [];
++  let generatedMissingCode = null;
+ 
+   function parseNumber(val) {
+     if (val == null) return "";
+@@ -212,7 +137,7 @@ function buildMasterPayloadFromUI(mode) {
+     return Number.isFinite(n) ? n : "";
+   }
+ 
+-  for (const li of items) {
++  for (const li of createLineItems) {
+     const hasAny =
+       (li.item && li.item.trim().length) ||
+       (li.com && li.com.trim().length) ||
+@@ -222,6 +147,17 @@ function buildMasterPayloadFromUI(mode) {
+ 
+     if (!hasAny) continue;
+ 
++    const parsed = parseCommodityForNotes(li.com);
++    const itemCode = (li.item || "").trim();
++
++    // Skip Master if no item code (unless it's a Generated row, which is invalid)
++    if (!itemCode) {
++      if (parsed.isGenerated && !generatedMissingCode) {
++        generatedMissingCode = parsed.material || "Generated line";
++      }
++      continue;
++    }
++
+     const gross = parseNumber(li.gross);
+     const tare  = parseNumber(li.tare);
+     const net   = (gross !== "" && tare !== "") ? (gross - tare) : "";
+@@ -229,8 +165,8 @@ function buildMasterPayloadFromUI(mode) {
+     const price = parseNumber(li.cost);
+ 
+     lines.push({
+-      material: li.com || "",
+-      materialNotes: "",      // you can populate later if you add a column
++      material: parsed.material || "",
++      materialNotes: parsed.note || "",
+       net: net === "" ? "" : net,
+       price: price === "" ? "" : price,
+       extension: "",          // let Sheets formulas calculate if you want
+@@ -238,200 +174,212 @@ function buildMasterPayloadFromUI(mode) {
+     });
+   }
+ 
++  if (generatedMissingCode) {
++    return { payload: null, error: `Generated line "${generatedMissingCode}" requires an item code.` };
++  }
++
+   if (!lines.length) {
+-    return null;
++    return { payload: null, error: null };
+   }
+ 
+   return {
+-    sheetId: selectedSheetId,
+-    rrNumber,
+-    date,
+-    supplier,
+-    term: "",                 // you can wire these later if you add them to Excel
+-    dueDate: "",
+-    daysTillDue: "",
+-    status: "",
+-    datePaid: "",
+-    poNumber,
+-    poStatus: "",
+-    poSageClosed: "",
+-    receiverSageEntry: verifiedBy || "",
+-    notes: "",                // base notes; carrier will be appended server-side
+-    carrier,
+-    lines
++    payload: {
++      sheetId: selectedSheetId,
++      rrNumber,
++      date,
++      supplier,
++      status: "",
++      datePaid: "",
++      poNumber,
++      poStatus: "",
++      poSageClosed: "",
++      receiverSageEntry: verifiedBy || "",
++      notes: "",                // base notes; carrier will be appended server-side
++      carrier,
++      lines
++    },
++    error: null
+   };
+ }
+ 
+ 
+ 
+-async function createWorkspaceAndSend() {
++function ensureGeneratedRowsHaveCodes() {
++  for (const li of createLineItems) {
++    const hasAny =
++      (li.item && li.item.trim().length) ||
++      (li.com && li.com.trim().length) ||
++      (li.gross && li.gross.trim().length) ||
++      (li.tare && li.tare.trim().length) ||
++      (li.cost && li.cost.trim().length);
++
++    if (!hasAny) continue;
++
++    const parsed = parseCommodityForNotes(li.com);
++    const itemCode = (li.item || "").trim();
++
++    if (parsed.isGenerated && !itemCode) {
++      return `Generated line "${parsed.material || ""}" requires an item code.`;
++    }
++  }
++
++  return null;
++}
++
++function buildSendPlan() {
+   if (!selectedSheetId) {
+-    setStatus("Select a Google Sheets file first.");
+-    return;
++    return { ok: false, message: "Select a Google Sheets file first." };
+   }
+-  if (createInFlight) return;
+ 
+   const wsNameInput = $("create_workspace_name");
+   const name = (wsNameInput && wsNameInput.value || "").trim();
+ 
+   if (!name) {
+-    setStatus("Workspace name is empty. Rename the Excel tab so it includes -MM-DD-XXX.");
+-    return;
++    return { ok: false, message: "Workspace name is empty. Rename the Excel tab so it includes -MM-DD-XXX." };
+   }
+   if (!isWorkspaceNameFormatValid(name)) {
+-    setStatus("Excel tab name must include -MM-DD-XXX (e.g. NOVA -1-17-025).");
+-    return;
+-  }
+-  if (workspaceState.type === "existing") {
+-    setStatus("This receiver already has a workspace in Sheets. Use Modify instead.");
+-    return;
++    return { ok: false, message: "Excel tab name must include -MM-DD-XXX (e.g. NOVA -1-17-025)." };
+   }
+   if (workspaceState.type === "title-invalid") {
+-    setStatus("Rename the Excel tab to include -MM-DD-XXX before sending.");
+-    return;
++    return { ok: false, message: "Rename the Excel tab to include -MM-DD-XXX before sending." };
+   }
+   if (!hasAnyCreateData()) {
+-    setStatus("Nothing to send yet. Fill some header or line items first.");
+-    return;
++    return { ok: false, message: "Nothing to send yet. Fill some header or line items first." };
+   }
+ 
+   const currentName = currentActiveWorksheet;
+   if (lastReadCreateSheetName && lastReadCreateSheetName !== currentName) {
+-    setStatus('Excel sheet changed. Click "Read Data From Excel" again before sending.');
+-    return;
++    return { ok: false, message: 'Excel sheet changed. Click "Read Data From Excel" again before sending.' };
+   }
+ 
+-  createInFlight = true;
+-  setButtonEnabled($("create_send"), false);
+-  setGlobalLoading(true, "Creating new workspace and sending data to Google Sheets…");
+-  setStatus("Sending to Google Sheets…");
++  const generatedError = ensureGeneratedRowsHaveCodes();
++  if (generatedError) {
++    return { ok: false, message: generatedError };
++  }
+ 
+-  try {
+-    const templateName = "CMX METAL NEW TEMPLATE";
++  if (workspaceState.type === "existing" && workspaceState.matchedTab) {
++    return { ok: true, action: "modify", targetTab: workspaceState.matchedTab, workspaceName: name };
++  }
+ 
+-    const cr = await fetch(`${BACKEND}/api/createTab`, {
+-      method: "POST",
+-      credentials: "include",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ sheetId: selectedSheetId, templateName, newName: name })
+-    });
+-    if (!cr.ok) throw new Error("createTab failed: " + cr.status);
++  if (workspaceState.type === "new-valid") {
++    return { ok: true, action: "create", targetTab: name, workspaceName: name };
++  }
+ 
+-    const valuesMap = buildValuesMapFromUI("create");
+-    await writeFieldsToTab(selectedSheetId, name, valuesMap);
++  return { ok: false, message: "Workspace state is unknown. Reload Sheets list and try again." };
++}
+ 
+-    // Update Master Receivers (create case)
+-    const masterPayload = buildMasterPayloadFromUI("create");
+-    if (masterPayload) {
+-      try {
+-        const mrRes = await fetch(`${BACKEND}/api/updateMasterFromReceiver`, {
+-          method: "POST",
+-          credentials: "include",
+-          headers: { "Content-Type": "application/json" },
+-          body: JSON.stringify(masterPayload)
+-        });
+-        if (!mrRes.ok) {
+-          console.warn("updateMasterFromReceiver (create) failed:", mrRes.status);
+-          setStatus(
+-            "Workspace created, but Master Receivers update failed (" +
+-            mrRes.status +
+-            ")."
+-          );
+-        } else {
+-          setStatus("Done: created new workspace and updated Master Receivers.");
+-        }
+-      } catch (e) {
+-        console.warn("updateMasterFromReceiver (create) error:", e);
+-        setStatus(
+-          "Workspace created, but Master Receivers update errored: " +
+-          (e.message || e)
+-        );
+-      }
++function openSendReviewModal() {
++  const plan = buildSendPlan();
++  if (!plan.ok) {
++    setStatus(plan.message || "Unable to send.");
++    return;
++  }
++
++  pendingSendPlan = plan;
++  const modal = $("actionModal");
++  const title = $("actionModalTitle");
++  const body = $("actionModalBody");
++
++  if (title) {
++    title.textContent = plan.action === "modify" ? "Update existing workspace" : "Create new workspace";
++  }
++
++  if (body) {
++    if (plan.action === "modify") {
++      body.textContent = `The receiver will update the existing tab "${plan.targetTab}" in the selected Google Sheet.`;
+     } else {
+-      setStatus("Workspace created (Master not updated: missing RR#/PO#/lines).");
++      body.textContent = `A new tab named "${plan.targetTab}" will be created from the active Excel worksheet.`;
+     }
++  }
+ 
+-    // refresh tabs & workspace state
+-    await onSheetSelected();
+-  } catch (err) {
+-    console.error(err);
+-    setStatus("Create failed: " + (err.message || err));
+-  } finally {
+-    createInFlight = false;
+-    setGlobalLoading(false);
+-    refreshSendButtonsState();
++  if (modal) {
++    modal.classList.remove("hidden");
+   }
+ }
+ 
+-async function modifySendToSheets() {
+-  if (!selectedSheetId) {
+-    setStatus("Select a Google Sheets file first.");
+-    return;
+-  }
+-  const tabName = $("modify_tab_select").value;
+-  if (!tabName) {
+-    setStatus("Choose which workspace tab to update.");
+-    return;
+-  }
+-  if (!hasAnyModifyData()) {
+-    setStatus("Nothing to send yet. Fill some header or line items first.");
+-    return;
+-  }
+-  const currentName = currentActiveWorksheet;
+-  if (lastReadModifySheetName && lastReadModifySheetName !== currentName) {
+-    setStatus('Excel sheet changed. Click "Read Data From Excel" again before sending.');
++function closeActionModal() {
++  const modal = $("actionModal");
++  if (modal) modal.classList.add("hidden");
++  pendingSendPlan = null;
++}
++
++async function confirmPendingSend() {
++  if (!pendingSendPlan || sendInFlight) {
++    closeActionModal();
+     return;
+   }
+-  if (modifyInFlight) return;
+ 
+-  modifyInFlight = true;
+-  setButtonEnabled($("modify_send"), false);
+-  setGlobalLoading(true, "Updating existing workspace in Google Sheets…");
+-  setStatus("Sending updates to Google Sheets…");
++  const plan = pendingSendPlan;
++  closeActionModal();
++
++  sendInFlight = true;
++  setButtonEnabled($("create_send"), false);
++  setGlobalLoading(true, plan.action === "modify" ? "Updating workspace in Google Sheets…" : "Creating workspace in Google Sheets…");
++  setStatus("Sending to Google Sheets…");
+ 
+   try {
+-    const valuesMap = buildValuesMapFromUI("modify");
+-    await writeFieldsToTab(selectedSheetId, tabName, valuesMap);
++    const valuesMap = buildValuesMapFromUI();
++
++    let targetTab = plan.targetTab;
++    if (plan.action === "create") {
++      const templateName = "CMX METAL NEW TEMPLATE";
++      const cr = await fetch(`${BACKEND}/api/createTab`, {
++        method: "POST",
++        credentials: "include",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ sheetId: selectedSheetId, templateName, newName: plan.targetTab })
++      });
++      if (!cr.ok) throw new Error("createTab failed: " + cr.status);
++    }
++
++    await writeFieldsToTab(selectedSheetId, targetTab, valuesMap);
++
++    const masterResult = buildMasterPayloadFromUI();
++    if (masterResult.error) {
++      throw new Error(masterResult.error);
++    }
+ 
+-    // Update Master Receivers (modify case)
+-    const masterPayload = buildMasterPayloadFromUI("modify");
+-    if (masterPayload) {
++    if (masterResult.payload) {
+       try {
+         const mrRes = await fetch(`${BACKEND}/api/updateMasterFromReceiver`, {
+           method: "POST",
+           credentials: "include",
+           headers: { "Content-Type": "application/json" },
+-          body: JSON.stringify(masterPayload)
++          body: JSON.stringify(masterResult.payload)
+         });
+         if (!mrRes.ok) {
+-          console.warn("updateMasterFromReceiver (modify) failed:", mrRes.status);
++          console.warn("updateMasterFromReceiver failed:", mrRes.status);
+           setStatus(
+-            "Workspace updated, but Master Receivers update failed (" +
++            `${plan.action === "modify" ? "Workspace updated" : "Workspace created"}, but Master Receivers update failed (` +
+             mrRes.status +
+             ")."
+           );
+         } else {
+           setStatus(
+-            "Done: updated workspace and Master Receivers for RR#: " +
+-            masterPayload.rrNumber +
+-            "."
++            plan.action === "modify"
++              ? `Done: updated workspace and Master Receivers for tab "${targetTab}".`
++              : "Done: created workspace and updated Master Receivers."
+           );
+         }
+       } catch (e) {
+-        console.warn("updateMasterFromReceiver (modify) error:", e);
++        console.warn("updateMasterFromReceiver error:", e);
+         setStatus(
+-          "Workspace updated, but Master Receivers update errored: " +
++          `${plan.action === "modify" ? "Workspace updated" : "Workspace created"}, but Master Receivers update errored: ` +
+           (e.message || e)
+         );
+       }
+     } else {
+-      setStatus("Workspace updated (Master not updated: missing RR#/PO#/lines).");
++      setStatus(
++        `${plan.action === "modify" ? "Workspace updated" : "Workspace created"} (Master not updated: missing RR#/PO#/lines).`
++      );
+     }
++
++    await onSheetSelected();
+   } catch (err) {
+     console.error(err);
+-    setStatus("Write failed: " + (err.message || err));
++    setStatus("Send failed: " + (err.message || err));
+   } finally {
+-    modifyInFlight = false;
++    sendInFlight = false;
+     setGlobalLoading(false);
+     refreshSendButtonsState();
+   }
+@@ -441,82 +389,49 @@ async function modifySendToSheets() {
+ // ----------------- BUTTON STATE / LOCK-OUT LOGIC -----------------
+ 
+ function refreshSendButtonsState() {
+-  // default: everything off
+-  let createEnabled = false;
+-  let modifyEnabled = false;
++  let sendEnabled = false;
+ 
+   // Pre-conditions: auth + sheet selected
+   if (!lastAuthOk) {
+     setButtonEnabled($("create_send"), false);
+-    setButtonEnabled($("modify_send"), false);
++    setButtonEnabled($("create_prefill"), false);
+     setSectionLocked($("createPanel"), true);
+-    setSectionLocked($("modifyPanel"), true);
+     return;
+   }
+ 
+   setSectionLocked($("createPanel"), !selectedSheetId);
+-  setSectionLocked($("modifyPanel"), !selectedSheetId);
+ 
+   if (!selectedSheetId) {
+     setButtonEnabled($("create_send"), false);
+-    setButtonEnabled($("modify_send"), false);
++    setButtonEnabled($("create_prefill"), false);
+     return;
+   }
+ 
+-  // lock create completely if Excel tab already has a workspace in Sheets
+-  if (workspaceState.type === "existing") {
+-    setSectionLocked($("createPanel"), true);
+-    setButtonEnabled($("create_send"), false);
+-  } else {
+-    setSectionLocked($("createPanel"), false);
+-  }
+-
+-  // CREATE: workspace name must be non-empty and valid format
+   const wsName = ($("create_workspace_name") && $("create_workspace_name").value || "").trim();
+   const nameValid = isWorkspaceNameFormatValid(wsName);
+-
+-  // Resync requirement for Create
+   const currentName = currentActiveWorksheet;
+-  const createNeedsResync =
++  const needsResync =
+     hasAnyCreateData() &&
+     lastReadCreateSheetName &&
+     currentName &&
+     lastReadCreateSheetName !== currentName;
+ 
+-  // allow prefill regardless of format, but send only when valid & resynced
+-  setButtonEnabled($("create_prefill"), !!selectedSheetId && !createInFlight);
++  const generatedError = ensureGeneratedRowsHaveCodes();
++
++  // allow prefill regardless of format, but disable while read/send in flight
++  setButtonEnabled($("create_prefill"), !!selectedSheetId && !createInFlight && !sendInFlight);
+ 
+-  if (!createInFlight &&
++  if (!sendInFlight &&
+       selectedSheetId &&
+-      workspaceState.type !== "existing" &&
+       workspaceState.type !== "title-invalid" &&
+       nameValid &&
+       hasAnyCreateData() &&
+-      !createNeedsResync) {
+-    createEnabled = true;
+-  }
+-
+-  // MODIFY: need selected tab + some data + resynced
+-  const selectedTab = $("modify_tab_select").value;
+-  const modifyNeedsResync =
+-    hasAnyModifyData() &&
+-    lastReadModifySheetName &&
+-    currentName &&
+-    lastReadModifySheetName !== currentName;
+-
+-  if (!modifyInFlight &&
+-      selectedSheetId &&
+-      selectedTab &&
+-      hasAnyModifyData() &&
+-      !modifyNeedsResync) {
+-    modifyEnabled = true;
++      !needsResync &&
++      !generatedError) {
++    if (workspaceState.type === "existing" || workspaceState.type === "new-valid") {
++      sendEnabled = true;
++    }
+   }
+ 
+-  // Respect in-flight flags (never re-enable mid-request)
+-  if (!createInFlight) {
+-    setButtonEnabled($("create_send"), createEnabled);
+-  }
+-  if (!modifyInFlight) {
+-    setButtonEnabled($("modify_send"), modifyEnabled);
+-  }
++  setButtonEnabled($("create_send"), sendEnabled);
+ }
+-- 
+2.43.0
+

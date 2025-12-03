@@ -1,29 +1,10 @@
 /* global Office */
 /*
   Main entrypoint:
-  - defines switchMode
   - wires up DOM events in Office.onReady
-  - starts active worksheet polling
+  - starts active worksheet polling with blocking overlay on tab changes
+  - routes send button to review modal handled in workflow.js
 */
-
-// ----------------- MODE SWITCHING -----------------
-
-function switchMode(mode) {
-  if (mode === "create") {
-    $("tabCreate").classList.add("active");
-    $("tabModify").classList.remove("active");
-    show($("createPanel"));
-    hide($("modifyPanel"));
-  } else {
-    $("tabModify").classList.add("active");
-    $("tabCreate").classList.remove("active");
-    show($("modifyPanel"));
-    hide($("createPanel"));
-  }
-  refreshSendButtonsState();
-}
-
-// ----------------- INIT / EVENT WIRING -----------------
 
 Office.onReady(() => {
   // auth
@@ -34,30 +15,21 @@ Office.onReady(() => {
   $("reloadSheetsBtn").addEventListener("click", loadSheets);
   $("modify_sheet_select").addEventListener("change", onSheetSelected);
 
-  // mode tabs
-  $("tabCreate").addEventListener("click", () => switchMode("create"));
-  $("tabModify").addEventListener("click", () => switchMode("modify"));
-
   // create panel
   $("create_prefill").addEventListener("click", readFieldsFromExcel_Create);
-  $("create_send").addEventListener("click", createWorkspaceAndSend);
-  $("create_add_line").addEventListener("click", () => addLineItem("create"));
-  $("create_workspace_name").addEventListener("input", () => {
-    // Only affects format validation; existence is based on Excel tab id.
-    refreshSendButtonsState();
-  });
+  $("create_send").addEventListener("click", openSendReviewModal);
+  $("create_add_line").addEventListener("click", () => addLineItem());
+  $("create_workspace_name").addEventListener("input", refreshSendButtonsState);
 
-  // modify panel
-  $("modify_prefill").addEventListener("click", readFieldsFromExcel_Modify);
-  $("modify_send").addEventListener("click", modifySendToSheets);
-  $("modify_add_line").addEventListener("click", () => addLineItem("modify"));
-  $("modify_tab_select").addEventListener("change", refreshSendButtonsState);
+  // modal actions
+  $("actionModalCancel").addEventListener("click", closeActionModal);
+  $("actionModalConfirm").addEventListener("click", confirmPendingSend);
 
   // Optional manual refresh button – still works as a quick resync
   const refreshBtn = $("refreshActiveSheet");
   if (refreshBtn) {
     refreshBtn.addEventListener("click", async () => {
-      await detectActiveWorksheet();
+      await detectActiveWorksheet(true);
       refreshSendButtonsState();
     });
   }
@@ -66,12 +38,9 @@ Office.onReady(() => {
   setStatus("Please sign in to continue.");
 
   // initial detect and polling for changes
-  detectActiveWorksheet().catch(err => console.warn("initial detect error", err));
+  detectActiveWorksheet(true).catch(err => console.warn("initial detect error", err));
   pollHandle = setInterval(
     () => detectActiveWorksheet().catch(err => console.warn("poll err", err)),
     2000
   );
 });
-
-
-//For scripting add in two files into the excel sheet and then aggregate them over time the

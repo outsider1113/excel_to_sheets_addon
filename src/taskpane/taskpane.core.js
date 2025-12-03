@@ -34,7 +34,8 @@ const ITEM_COLUMNS = {
   com:   "B",    // COMMODITY
   gross: "C",    // GROSS
   tare:  "D",    // TARE
-  cost:  "F"     // COST
+  cost:  "F",    // COST
+  notes: "O"     // MATERIAL NOTES
 };
 const LINE_KEYS = ["item", "com", "gross", "tare", "cost"];
 
@@ -102,10 +103,10 @@ let selectedSheetId = null;
 let currentTabs = [];   // tab titles for selected sheet
 
 let currentActiveWorksheet = null;
+let lastDetectedWorksheet = null;
 
-// Which sheet did we read fields from last, per mode?
+// Which sheet did we read fields from last?
 let lastReadCreateSheetName = null;
-let lastReadModifySheetName = null;
 
 let workspaceState = {
   type: "unknown",      // "existing" | "new-valid" | "title-invalid" | "unknown"
@@ -114,11 +115,10 @@ let workspaceState = {
 };
 
 let createInFlight = false;
-let modifyInFlight = false;
+let sendInFlight = false;
 
 // dynamic line items (arrays of { item, com, gross, tare, cost })
 let createLineItems = [];
-let modifyLineItems = [];
 
 // ----------------- AUTH / SHEETS -----------------
 
@@ -215,15 +215,12 @@ function populateSheetsSelect() {
 
 async function onSheetSelected() {
   selectedSheetId = $("modify_sheet_select").value || null;
-  const tabSel = $("modify_tab_select");
-  tabSel.innerHTML = "<option value=''>— choose tab —</option>";
   currentTabs = [];
   workspaceState = { type: "unknown", identifier: null, matchedTab: null };
 
   if (!selectedSheetId) {
     setStatus("Select a Google Sheets file to continue.");
     setSectionLocked($("createPanel"), true);
-    setSectionLocked($("modifyPanel"), true);
     refreshSendButtonsState();
     return;
   }
@@ -244,38 +241,23 @@ async function onSheetSelected() {
       (t.properties && t.properties.title) ? t.properties.title : (t.title || t)
     );
 
-    tabSel.innerHTML = "<option value=''>— choose tab —</option>";
-    currentTabs.forEach(t => {
-      const o = document.createElement("option");
-      o.value = t;
-      o.textContent = t;
-      tabSel.appendChild(o);
-    });
-
-    // Evaluate workspace state based on current Excel tab + loaded tabs.
-    // Evaluate workspace state based on current Excel tab + loaded tabs.
     await evaluateWorkspaceState();
     updateModeBanner();
     updateResyncWarning();
 
-
-    // If this Excel tab already has a workspace in Sheets, auto-switch to Modify.
     if (workspaceState.type === "existing" && workspaceState.matchedTab) {
-      $("modify_tab_select").value = workspaceState.matchedTab;
-      switchMode("modify");
       setStatus(
         `Workspace for this Excel tab already exists as "${workspaceState.matchedTab}". ` +
-        "Create is locked. Use Modify instead."
+        "Sending will update that tab."
       );
     } else if (workspaceState.type === "title-invalid") {
       // evaluateWorkspaceState already set a detailed message about title format.
     } else {
-      setStatus("Tabs loaded. Choose Create or Modify.");
+      setStatus("Tabs loaded. Ready to read from Excel.");
     }
 
-    // Sections are now unlocked (but buttons still controlled by refreshSendButtonsState)
+    // Section is now unlocked (but buttons still controlled by refreshSendButtonsState)
     setSectionLocked($("createPanel"), false);
-    setSectionLocked($("modifyPanel"), false);
   } catch (err) {
     console.error(err);
     setStatus("Error loading tabs: " + (err.message || err));
@@ -286,7 +268,8 @@ async function onSheetSelected() {
 
 // ----------------- ACTIVE WORKSHEET TRACKING -----------------
 
-async function detectActiveWorksheet() {
+async function detectActiveWorksheet(forceOverlay = false) {
+  let showLoader = false;
   try {
     await Excel.run(async (ctx) => {
       const ws = ctx.workbook.worksheets.getActiveWorksheet();
@@ -294,12 +277,18 @@ async function detectActiveWorksheet() {
       await ctx.sync();
 
       const currentName = ws.name || "";
+      const tabChanged = currentName !== lastDetectedWorksheet;
+      if (forceOverlay || tabChanged) {
+        setGlobalLoading(true, "Updating for active Excel tab...");
+        showLoader = true;
+      }
+
       currentActiveWorksheet = currentName;
+      lastDetectedWorksheet = currentName;
 
       const nameSpan = $("activeSheetName");
       if (nameSpan) nameSpan.textContent = currentName;
 
-      // Always mirror active Excel tab into the workspace-name field
       // Always mirror active Excel tab into the workspace-name field
       updateCreateWorkspaceNameFromActive(currentName);
 
@@ -311,6 +300,8 @@ async function detectActiveWorksheet() {
     });
   } catch (err) {
     console.warn("detectActiveWorksheet error", err);
+  } finally {
+    if (showLoader) setGlobalLoading(false);
   }
 }
 
@@ -396,6 +387,32 @@ function findTabByIdentifier(identifier) {
   return null;
 }
 
+// Normalize commodity text, capture any parenthetical notes, and detect GENERATED prefix
+function parseCommodityForNotes(raw) {
+  const result = { material: "", note: "", isGenerated: false };
+  if (raw == null) return result;
+
+  let text = String(raw).trim();
+  const genMatch = text.match(/^\s*generated\s*:\s*(.*)$/i);
+  if (genMatch) {
+    result.isGenerated = true;
+    text = genMatch[1].trim();
+  }
+
+  const noteParts = [];
+  text = text.replace(/\(([^)]*)\)/g, (_, inner) => {
+    if (inner && inner.trim()) noteParts.push(inner.trim());
+    return " ";
+  });
+
+  result.material = text.replace(/\s+/g, " ").trim();
+  if (noteParts.length) {
+    result.note = noteParts.join("; ");
+  }
+
+  return result;
+}
+
 
 
 function updateModeBanner() {
@@ -454,11 +471,6 @@ function updateResyncWarning() {
       lastReadCreateSheetName !== currentName) {
     showWarning = true;
     msg = `Excel sheet changed. Click "Read Data From Excel" again before sending.`;
-  } else if (hasAnyModifyData() &&
-             lastReadModifySheetName &&
-             lastReadModifySheetName !== currentName) {
-    showWarning = true;
-    msg = `Excel sheet changed. Click "Read Data From Excel" again before sending.`;
   }
 
 
@@ -473,18 +485,15 @@ function updateResyncWarning() {
 
 // ----------------- MULTI-ROW LINE ITEMS HELPERS -----------------
 
-function addLineItem(mode) {
-  const isCreate = mode === "create";
-  const items = isCreate ? createLineItems : modifyLineItems;
-  items.push({ item: "", com: "", gross: "", tare: "", cost: "" });
-  renderLineItems(mode);
+function addLineItem() {
+  createLineItems.push({ item: "", com: "", gross: "", tare: "", cost: "" });
+  renderLineItems();
   refreshSendButtonsState();
 }
 
-function renderLineItems(mode) {
-  const isCreate = mode === "create";
-  const container = isCreate ? $("createLineItemsContainer") : $("modifyLineItemsContainer");
-  const items = isCreate ? createLineItems : modifyLineItems;
+function renderLineItems() {
+  const container = $("createLineItemsContainer");
+  const items = createLineItems;
 
   if (!container) return;
   container.innerHTML = "";
@@ -518,7 +527,7 @@ function renderLineItems(mode) {
     removeBtn.textContent = "×";
     removeBtn.addEventListener("click", () => {
       items.splice(idx, 1);
-      renderLineItems(mode);
+      renderLineItems();
       refreshSendButtonsState();
     });
     row.appendChild(removeBtn);
@@ -529,21 +538,17 @@ function renderLineItems(mode) {
 
 // ----------------- BUILD VALUES MAP FROM UI -----------------
 
-function buildValuesMapFromUI(mode) {
-  const isCreate = mode === "create";
-
+function buildValuesMapFromUI() {
   const valuesMap = {};
 
   // headers
   HEADER_FIELDS.forEach(h => {
-    const id = isCreate ? h.cId : h.mId;
-    const el = $(id);
+    const el = $(h.cId);
     valuesMap[h.cell] = el ? el.value || "" : "";
   });
 
   // line items
-  const items = isCreate ? createLineItems : modifyLineItems;
-  items.forEach((li, idx) => {
+  createLineItems.forEach((li, idx) => {
     const row = ITEM_START_ROW + idx;
     const any =
       (li.item && li.item.trim().length) ||
@@ -554,11 +559,17 @@ function buildValuesMapFromUI(mode) {
 
     if (!any) return;
 
+    const parsed = parseCommodityForNotes(li.com);
+
     valuesMap[`${ITEM_COLUMNS.item}${row}`]  = li.item  || "";
-    valuesMap[`${ITEM_COLUMNS.com}${row}`]   = li.com   || "";
+    valuesMap[`${ITEM_COLUMNS.com}${row}`]   = parsed.material || li.com || "";
     valuesMap[`${ITEM_COLUMNS.gross}${row}`] = li.gross || "";
     valuesMap[`${ITEM_COLUMNS.tare}${row}`]  = li.tare  || "";
     valuesMap[`${ITEM_COLUMNS.cost}${row}`]  = li.cost  || "";
+
+    if (parsed.note) {
+      valuesMap[`${ITEM_COLUMNS.notes}${row}`] = parsed.note;
+    }
   });
 
   return valuesMap;
@@ -601,19 +612,16 @@ async function writeFieldsToTab(sheetId, tabName, valuesMap) {
 
 // ----------------- “HAS DATA” HELPERS -----------------
 
-function hasAnyHeaderValues(prefix) {
-  // prefix: "c_" or "m_"
+function hasAnyHeaderValues() {
   for (const h of HEADER_FIELDS) {
-    const id = prefix === "c_" ? h.cId : h.mId;
-    const el = $(id);
+    const el = $(h.cId);
     if (el && String(el.value || "").trim().length) return true;
   }
   return false;
 }
 
-function hasAnyLineItems(mode) {
-  const items = mode === "create" ? createLineItems : modifyLineItems;
-  return items.some(li => {
+function hasAnyLineItems() {
+  return createLineItems.some(li => {
     return (
       (li.item && li.item.trim().length) ||
       (li.com && li.com.trim().length) ||
@@ -625,9 +633,5 @@ function hasAnyLineItems(mode) {
 }
 
 function hasAnyCreateData() {
-  return hasAnyHeaderValues("c_") || hasAnyLineItems("create");
-}
-
-function hasAnyModifyData() {
-  return hasAnyHeaderValues("m_") || hasAnyLineItems("modify");
+  return hasAnyHeaderValues() || hasAnyLineItems();
 }

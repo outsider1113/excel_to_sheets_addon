@@ -143,33 +143,6 @@ button {
 }
 
 /* TABS */
-.tabs {
-  display: flex;
-  margin: 10px 0;
-  padding: 2px;
-  background: #e5ebf7;
-  border-radius: 999px;
-}
-
-.tab {
-  flex: 1;
-  padding: 8px 6px;
-  background: transparent;
-  border: none;
-  border-radius: 999px;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
-  color: #4b5563;
-  transition: background 0.1s ease, color 0.1s ease;
-}
-
-.tab.active {
-  background: #ffffff;
-  color: #1d4ed8;
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
-}
-
 /* GRID FIELDS */
 .field-grid {
   display: grid;
@@ -390,6 +363,47 @@ input {
 .global-loading-text {
   font-size: 13px;
   color: #111827;
+}
+
+/* ACTION MODAL */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.modal.hidden {
+  display: none !important;
+}
+
+.modal-card {
+  background: #ffffff;
+  padding: 16px 18px;
+  border-radius: 12px;
+  max-width: 360px;
+  width: calc(100% - 24px);
+  box-shadow: 0 14px 40px rgba(15, 23, 42, 0.35);
+}
+
+.modal-card h3 {
+  margin-top: 0;
+  margin-bottom: 6px;
+}
+
+.modal-card p {
+  font-size: 13px;
+  color: #374151;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 /* Simple spinner */

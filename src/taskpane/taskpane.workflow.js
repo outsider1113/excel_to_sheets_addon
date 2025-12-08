@@ -104,7 +104,6 @@ function isWorkspaceNameFormatValid(name) {
 
 
 
-// Build payload for /api/updateMasterFromReceiver from UI + in-memory items
 function buildMasterPayloadFromUI() {
   // Header inputs
   const pfEl       = $("c_pf");
@@ -121,8 +120,8 @@ function buildMasterPayloadFromUI() {
   const rrNumber   = rcvEl     ? String(rcvEl.value || "").trim()     : "";
   const verifiedBy = verEl     ? String(verEl.value || "").trim()     : "";
 
+  // If there is no RR or PO, we can't meaningfully update Master.
   if (!rrNumber || !poNumber) {
-    // Not enough to meaningfully update Master – let caller decide whether to skip
     return { payload: null, error: null };
   }
 
@@ -147,10 +146,10 @@ function buildMasterPayloadFromUI() {
 
     if (!hasAny) continue;
 
-    const parsed = parseCommodityForNotes(li.com);
+    const parsed   = parseCommodityForNotes(li.com);
     const itemCode = (li.item || "").trim();
 
-    // Skip Master if no item code (unless it's a Generated row, which is invalid)
+    // Skip Master if no item code
     if (!itemCode) {
       if (parsed.isGenerated && !generatedMissingCode) {
         generatedMissingCode = parsed.material || "Generated line";
@@ -161,16 +160,20 @@ function buildMasterPayloadFromUI() {
     const gross = parseNumber(li.gross);
     const tare  = parseNumber(li.tare);
     const net   = (gross !== "" && tare !== "") ? (gross - tare) : "";
-
     const price = parseNumber(li.cost);
 
+    // Per-line PO: use the inline PO# if present, otherwise fallback to header PO
+    const effectivePo = parsed.poOverride || poNumber;
+
     lines.push({
+      itemCode,                      // for server.js normalizedLines
       material: parsed.material || "",
       materialNotes: parsed.note || "",
       net: net === "" ? "" : net,
       price: price === "" ? "" : price,
-      extension: "",          // let Sheets formulas calculate if you want
-      poWeight: ""            // left blank; you adjust in Master
+      extension: "",                 // let Sheets' formulas handle extensions
+      poWeight: "",                  // updated/derived in Master
+      linePoNumber: effectivePo      // per-line PO for multi-PO situations
     });
   }
 
@@ -179,6 +182,7 @@ function buildMasterPayloadFromUI() {
   }
 
   if (!lines.length) {
+    // No valid lines for Master (all missing item codes etc.)
     return { payload: null, error: null };
   }
 
@@ -188,13 +192,16 @@ function buildMasterPayloadFromUI() {
       rrNumber,
       date,
       supplier,
-      status: "",
+      status: "",           // Master formulas handle these
       datePaid: "",
-      poNumber,
+      term: "",             // computed in Master from PO/Supplier if needed
+      dueDate: "",
+      daysTillDue: "",
+      poNumber,             // header PO (used when no per-line override)
       poStatus: "",
       poSageClosed: "",
-      receiverSageEntry: verifiedBy || "",
-      notes: "",                // base notes; carrier will be appended server-side
+      receiverSageEntry: "",
+      notes: "",            // header-level notes already live on receiver tab
       carrier,
       lines
     },

@@ -389,21 +389,39 @@ function findTabByIdentifier(identifier) {
 
 // Normalize commodity text, capture any parenthetical notes, and detect GENERATED prefix
 function parseCommodityForNotes(raw) {
-  const result = { material: "", note: "", isGenerated: false };
+  // Used ONLY for Master logic (and optional auto-notes),
+  // NOT for the 1:1 receiver copy COM text.
+  const result = {
+    material: "",
+    note: "",
+    isGenerated: false,
+    poOverride: "" // per-line PO number, e.g. "12345"
+  };
   if (raw == null) return result;
 
   let text = String(raw).trim();
+
+  // GENERATED: prefix
   const genMatch = text.match(/^\s*generated\s*:\s*(.*)$/i);
   if (genMatch) {
     result.isGenerated = true;
     text = genMatch[1].trim();
   }
 
+  // Pull (...) into noteParts
   const noteParts = [];
   text = text.replace(/\(([^)]*)\)/g, (_, inner) => {
     if (inner && inner.trim()) noteParts.push(inner.trim());
     return " ";
   });
+
+  // Look for trailing "PO# <something>" and use that as a per-line PO
+  const poMatch = text.match(/\bPO\s*#\s*([A-Za-z0-9\-]+)\s*$/i);
+  if (poMatch) {
+    result.poOverride = poMatch[1].trim();
+    // Remove the PO# suffix from the material text
+    text = text.slice(0, poMatch.index).trim();
+  }
 
   result.material = text.replace(/\s+/g, " ").trim();
   if (noteParts.length) {
@@ -412,6 +430,7 @@ function parseCommodityForNotes(raw) {
 
   return result;
 }
+
 
 
 
@@ -559,14 +578,17 @@ function buildValuesMapFromUI() {
 
     if (!any) return;
 
-    const parsed = parseCommodityForNotes(li.com);
+    const rawCom = li.com || "";
+    const parsed = parseCommodityForNotes(rawCom);
 
+    // RECEIVER COPY: must be 1:1 with Excel input.
     valuesMap[`${ITEM_COLUMNS.item}${row}`]  = li.item  || "";
-    valuesMap[`${ITEM_COLUMNS.com}${row}`]   = parsed.material || li.com || "";
+    valuesMap[`${ITEM_COLUMNS.com}${row}`]   = rawCom;         // keep exact text
     valuesMap[`${ITEM_COLUMNS.gross}${row}`] = li.gross || "";
     valuesMap[`${ITEM_COLUMNS.tare}${row}`]  = li.tare  || "";
     valuesMap[`${ITEM_COLUMNS.cost}${row}`]  = li.cost  || "";
 
+    // Optional: still use parsed note for MATERIAL NOTES column
     if (parsed.note) {
       valuesMap[`${ITEM_COLUMNS.notes}${row}`] = parsed.note;
     }
@@ -574,6 +596,7 @@ function buildValuesMapFromUI() {
 
   return valuesMap;
 }
+
 
 // ----------------- WRITE TO SHEETS (BATCH + FALLBACK) -----------------
 

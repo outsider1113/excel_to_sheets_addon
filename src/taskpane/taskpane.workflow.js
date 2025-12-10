@@ -102,8 +102,6 @@ function isWorkspaceNameFormatValid(name) {
   return ID_RE.test(name.trim());
 }
 
-
-
 function buildMasterPayloadFromUI() {
   // Header inputs
   const pfEl       = $("c_pf");

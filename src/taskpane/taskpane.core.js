@@ -395,7 +395,7 @@ function parseCommodityForNotes(raw) {
     material: "",
     note: "",
     isGenerated: false,
-    poOverride: "" // per-line PO number, e.g. "12345"
+    poOverride: "" // per-line PO number, e.g. "P012345"
   };
   if (raw == null) return result;
 
@@ -408,30 +408,40 @@ function parseCommodityForNotes(raw) {
     text = genMatch[1].trim();
   }
 
-  // Pull (...) into noteParts
+  // Pull (...) into noteParts (parentheses only)
   const noteParts = [];
   text = text.replace(/\(([^)]*)\)/g, (_, inner) => {
     if (inner && inner.trim()) noteParts.push(inner.trim());
     return " ";
   });
 
-  // Look for trailing "PO# <something>" and use that as a per-line PO
-  const poMatch = text.match(/\bPO\s*#\s*([A-Za-z0-9\-]+)\s*$/i);
+  // Look for "PO# PXXXXX" (with messy spacing) anywhere in the string.
+  // - Allow "PO#P12345", "PO # P12345", etc.
+  // - Require P + at least 4 digits so we don't grab random junk.
+  const poMatch = text.match(/\bPO\s*#\s*(P\d{4,})\b/i);
   if (poMatch) {
-    result.poOverride = poMatch[1].trim();
-    // Remove the PO# suffix from the material text
-    text = text.slice(0, poMatch.index).trim();
+    const fullMatch = poMatch[0];     // e.g. "PO# P012345"
+    const pCode     = poMatch[1];     // e.g. "P012345"
+    const idx       = poMatch.index;
+
+    result.poOverride = pCode.trim().toUpperCase();
+
+    // For Master material: drop everything from the PO segment onward
+    // so any receiver-specific words after the PO do NOT affect Master grouping.
+    text = text.slice(0, idx).trim();
+    // (The full raw text still goes to the receiver copy unchanged,
+    //  via buildValuesMapFromUI.)
   }
 
+  // Normalize remaining commodity as the Master "material"
   result.material = text.replace(/\s+/g, " ").trim();
+
   if (noteParts.length) {
     result.note = noteParts.join("; ");
   }
 
   return result;
 }
-
-
 
 
 function updateModeBanner() {

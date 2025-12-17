@@ -7,8 +7,10 @@
 
   "repository": {
     "type": "git",
-    "url": "https://github.com/OfficeDev/Office-Addin-TaskPane-JS.git"
+    "url": "https://github.com/outsider1113/excel_to_sheets_addon.git"
   },
+
+  "homepage": "https://outsider1113.github.io/excel_to_sheets_addon/",
 
   "config": {
     "app_to_debug": "excel",

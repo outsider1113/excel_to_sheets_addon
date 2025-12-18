@@ -5,7 +5,7 @@ const CopyWebpackPlugin = require("copy-webpack-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 
 const urlDev = "https://localhost:3000/";
-const urlProd = "https://www.contoso.com/"; // CHANGE THIS TO YOUR PRODUCTION DEPLOYMENT LOCATION
+const urlProd = "https://outsider1113.github.io/excel_to_sheets_addon/"; // CHANGE THIS TO YOUR PRODUCTION DEPLOYMENT LOCATION
 
 async function getHttpsOptions() {
   const httpsOptions = await devCerts.getHttpsServerOptions();
@@ -18,7 +18,12 @@ module.exports = async (env, options) => {
     devtool: "source-map",
     entry: {
       polyfill: ["core-js/stable", "regenerator-runtime/runtime"],
+
+      // Taskpane bundle
       taskpane: ["./src/taskpane/taskpane.js", "./src/taskpane/taskpane.html"],
+
+      // ✅ Commands bundle (for Ribbon Add-in Commands FunctionFile)
+      commands: ["./src/commands/commands.js", "./src/commands/commands.html"],
     },
     output: {
       clean: true,
@@ -58,6 +63,14 @@ module.exports = async (env, options) => {
         template: "./src/taskpane/taskpane.html",
         chunks: ["polyfill", "taskpane"],
       }),
+
+      // ✅ Emit commands.html
+      new HtmlWebpackPlugin({
+        filename: "commands.html",
+        template: "./src/commands/commands.html",
+        chunks: ["polyfill", "commands"],
+      }),
+
       new CopyWebpackPlugin({
         patterns: [
           {

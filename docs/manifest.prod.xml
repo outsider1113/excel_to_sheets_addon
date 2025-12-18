@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xsi:type="TaskPaneApp">
+
+  <!-- Core metadata -->
+  <Id>e3972aa3-a326-4950-aff7-bac2a64844af</Id>
+
+  <!-- IMPORTANT: bump this anytime you change commands/ribbon stuff -->
+  <Version>1.0.0.1</Version>
+
+  <ProviderName>CMX Metals</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="CMX Excel to Sheets Sync"/>
+  <Description DefaultValue="Sync Excel receiver data into CMX Google Sheets (CURRENT PIPELINE and MASTER RECEIVERS)." />
+
+  <!-- Icons (must be HTTPS) -->
+  <IconUrl DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/assets/icon-32.png" />
+  <HighResolutionIconUrl DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/assets/icon-128.png" />
+
+  <!-- Help / repo link -->
+  <SupportUrl DefaultValue="https://github.com/outsider1113/excel_to_sheets_addon" />
+
+  <!-- Domains your add-in is allowed to talk to -->
+  <AppDomains>
+    <AppDomain>https://outsider1113.github.io</AppDomain>
+    <AppDomain>https://excel-sheets-backend.onrender.com</AppDomain>
+    <AppDomain>https://accounts.google.com</AppDomain>
+    <AppDomain>https://www.googleapis.com</AppDomain>
+    <AppDomain>https://apis.google.com</AppDomain>
+  </AppDomains>
+
+  <!-- Host: Excel workbooks -->
+  <Hosts>
+    <Host Name="Workbook" />
+  </Hosts>
+
+  <!-- Where Excel loads the taskpane page -->
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/taskpane.html" />
+  </DefaultSettings>
+
+  <!-- Needs to write into the workbook -->
+  <Permissions>ReadWriteDocument</Permissions>
+
+  <!-- ADD-IN COMMANDS (Ribbon button) -->
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+
+          <!-- Function file (HTML) for command runtime (future-proof + avoids edge cases) -->
+          <FunctionFile resid="CMX.CommandsUrl" />
+
+          <!-- Adds a button to the Excel ribbon (Home tab) -->
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="CMX.Group">
+                <Label resid="CMX.GroupLabel" />
+                <Icon>
+                  <bt:Image size="16" resid="CMX.Icon.16" />
+                  <bt:Image size="32" resid="CMX.Icon.32" />
+                  <bt:Image size="80" resid="CMX.Icon.80" />
+                </Icon>
+
+                <Control xsi:type="Button" id="CMX.OpenTaskpane">
+                  <Label resid="CMX.ButtonLabel" />
+                  <Supertip>
+                    <Title resid="CMX.ButtonLabel" />
+                    <Description resid="CMX.ButtonTooltip" />
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="CMX.Icon.16" />
+                    <bt:Image size="32" resid="CMX.Icon.32" />
+                    <bt:Image size="80" resid="CMX.Icon.80" />
+                  </Icon>
+
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>CMX.Taskpane</TaskpaneId>
+                    <SourceLocation resid="CMX.TaskpaneUrl" />
+                    <Title resid="CMX.TaskpaneTitle" />
+                  </Action>
+                </Control>
+
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+
+    <!-- Requirements for ribbon commands -->
+    <Requirements>
+      <bt:Sets DefaultMinVersion="1.1">
+        <bt:Set Name="Workbook" MinVersion="1.1" />
+        <bt:Set Name="AddinCommands" MinVersion="1.1" />
+      </bt:Sets>
+    </Requirements>
+
+    <!-- Resources for labels, URLs, icons -->
+    <Resources>
+      <bt:Images>
+        <bt:Image id="CMX.Icon.16" DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/assets/icon-16.png" />
+        <bt:Image id="CMX.Icon.32" DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/assets/icon-32.png" />
+        <bt:Image id="CMX.Icon.80" DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/assets/icon-80.png" />
+      </bt:Images>
+
+      <bt:Urls>
+        <bt:Url id="CMX.TaskpaneUrl" DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/taskpane.html" />
+        <bt:Url id="CMX.CommandsUrl" DefaultValue="https://outsider1113.github.io/excel_to_sheets_addon/commands.html" />
+      </bt:Urls>
+
+      <bt:ShortStrings>
+        <bt:String id="CMX.GroupLabel" DefaultValue="CMX Sync" />
+        <bt:String id="CMX.ButtonLabel" DefaultValue="Open CMX Sync" />
+        <bt:String id="CMX.TaskpaneTitle" DefaultValue="CMX Excel to Sheets" />
+      </bt:ShortStrings>
+
+      <bt:LongStrings>
+        <bt:String id="CMX.ButtonTooltip" DefaultValue="Open the CMX Excel → Google Sheets sync taskpane." />
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+
+</OfficeApp>

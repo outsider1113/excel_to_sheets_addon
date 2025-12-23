@@ -40,7 +40,7 @@ const ITEM_COLUMNS = {
 const LINE_KEYS = ["item", "com", "gross", "tare", "cost"];
 
 // Regex to extract id from Excel tab name, e.g. "...-11-02-345"
-const ID_RE = /-(\d{1,2})-(\d{1,2})-(\d{3})$/;
+const ID_RE = /-\s*(\d{1,2})-(\d{1,2})-(\d{3})$/;
 
 // ----------------- DOM HELPERS -----------------
 
@@ -327,25 +327,63 @@ async function evaluateWorkspaceState() {
   }
 
   if (!identifier) {
-    // title doesn't contain -MM-DD-XXX at the end
+    // title doesn't contain -MM-DD-XXX at the end (dash may be followed by a space)
     workspaceState.type = "title-invalid";
     workspaceState.identifier = null;
     if (selectedSheetId) {
       setStatus(
-        "Active Excel tab name does not contain -MM-DD-XXX identifier. " +
-        "You can read values, but Create is disabled until the tab title is fixed."
+        "Active Excel tab name does not contain -MM-DD-XXX identifier (e.g. NOVA -1-17-025 or NOVA - 1-17-025). " +
+        "You can read values, but Send is disabled until the tab title is fixed."
       );
     }
     return;
   }
 
   workspaceState.identifier = identifier;
-  const matched = findTabByIdentifier(identifier);
-  if (matched) {
-    workspaceState.type = "existing";
-    workspaceState.matchedTab = matched;
-  } else {
+
+  // IMPORTANT CHANGE:
+  // We no longer create a 1:1 receiver copy tab in Google Sheets.
+  // Create vs Modify is determined by looking up (Receiver # + month/day) in the RECEIVER RECORDS tab.
+  if (!selectedSheetId) {
+    workspaceState.type = "unknown";
+    return;
+  }
+
+  // identifier looks like "-M-D-XXX" (from the Excel tab name)
+  const parts = identifier.split("-");
+  // parts: ["", M, D, XXX]
+  const mm = String(parts[1] || "").trim().padStart(2, "0");
+  const dd = String(parts[2] || "").trim().padStart(2, "0");
+  const rr = String(parts[3] || "").trim();
+
+  // We only need month/day for the receiver-record match.
+  const dateReceivedMD = `${mm}/${dd}`;
+
+  try {
+    const qs = new URLSearchParams({
+      sheetId: selectedSheetId,
+      rrNumber: rr,
+      dateReceived: dateReceivedMD
+    });
+
+    const res = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, {
+      credentials: "include"
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      workspaceState.type = (data && data.exists) ? "existing" : "new-valid";
+      workspaceState.matchedTab = null;
+      return;
+    }
+
+    // If the record check fails, default to "new-valid" but keep send enabled.
     workspaceState.type = "new-valid";
+    workspaceState.matchedTab = null;
+  } catch (e) {
+    console.warn("receiverRecordStatus check failed:", e);
+    workspaceState.type = "new-valid";
+    workspaceState.matchedTab = null;
   }
 }
 
@@ -469,14 +507,16 @@ function updateModeBanner() {
     labelEl.textContent = "Mode";
     textEl.textContent =
       "Cannot send yet. Rename the Excel tab to include -MM-DD-XXX.";
-  } else if (workspaceState.type === "existing" && workspaceState.matchedTab) {
+  } else if (workspaceState.type === "existing") {
     banner.className = "mode-banner modify";
     labelEl.textContent = "Modifying";
-    textEl.textContent = `Will update existing tab: "${workspaceState.matchedTab}" in Google Sheets.`;
+    textEl.textContent =
+      'Receiver already exists in "RECEIVER RECORDS" (Receiver # + month/day). Will update Master Receivers and refresh Date Uploaded.';
   } else if (workspaceState.type === "new-valid") {
     banner.className = "mode-banner create";
     labelEl.textContent = "Creating";
-    textEl.textContent = `Will create new tab from: "${activeName}" in Google Sheets.`;
+    textEl.textContent =
+      'Receiver not found in "RECEIVER RECORDS". Will create a new upload record, then update Master Receivers.';
   } else {
     banner.className = "mode-banner";
     labelEl.textContent = "Mode";

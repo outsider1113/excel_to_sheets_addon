@@ -102,6 +102,33 @@ function isWorkspaceNameFormatValid(name) {
   return ID_RE.test(name.trim());
 }
 
+function buildReceiverRecordPayloadFromUI() {
+  const pfEl  = $("c_pf");
+  const drEl  = $("c_dr");
+  const poEl  = $("c_po");
+  const rcvEl = $("c_rcv");
+
+  const purchaseFrom = pfEl  ? String(pfEl.value || "").trim()  : "";
+  const dateReceived = drEl  ? String(drEl.value || "").trim()  : "";
+  const poNumber     = poEl  ? String(poEl.value || "").trim()  : "";
+  const rrNumber     = rcvEl ? String(rcvEl.value || "").trim() : "";
+
+  if (!rrNumber || !dateReceived) {
+    return { payload: null, error: "Receiver # and Date Received are required to log RECEIVER RECORDS." };
+  }
+
+  return {
+    payload: {
+      sheetId: selectedSheetId,
+      rrNumber,
+      poNumber,
+      purchaseFrom,
+      dateReceived
+    },
+    error: null
+  };
+}
+
 function buildMasterPayloadFromUI() {
   // Header inputs
   const pfEl       = $("c_pf");
@@ -243,7 +270,7 @@ function buildSendPlan() {
     return { ok: false, message: "Workspace name is empty. Rename the Excel tab so it includes -MM-DD-XXX." };
   }
   if (!isWorkspaceNameFormatValid(name)) {
-    return { ok: false, message: "Excel tab name must include -MM-DD-XXX (e.g. NOVA -1-17-025)." };
+    return { ok: false, message: "Excel tab name must include -MM-DD-XXX (e.g. NOVA -1-17-025 or NOVA - 1-17-025)." };
   }
   if (workspaceState.type === "title-invalid") {
     return { ok: false, message: "Rename the Excel tab to include -MM-DD-XXX before sending." };
@@ -262,15 +289,10 @@ function buildSendPlan() {
     return { ok: false, message: generatedError };
   }
 
-  if (workspaceState.type === "existing" && workspaceState.matchedTab) {
-    return { ok: true, action: "modify", targetTab: workspaceState.matchedTab, workspaceName: name };
-  }
-
-  if (workspaceState.type === "new-valid") {
-    return { ok: true, action: "create", targetTab: name, workspaceName: name };
-  }
-
-  return { ok: false, message: "Workspace state is unknown. Reload Sheets list and try again." };
+  // We no longer create a 1:1 receiver tab copy in Sheets. Sending always:
+  // 1) updates Master Receivers, and
+  // 2) upserts a row in RECEIVER RECORDS.
+  return { ok: true, action: "send", workspaceName: name };
 }
 
 function openSendReviewModal() {
@@ -285,21 +307,16 @@ function openSendReviewModal() {
   const title = $("actionModalTitle");
   const body = $("actionModalBody");
 
-  if (title) {
-    title.textContent = plan.action === "modify" ? "Update existing workspace" : "Create new workspace";
-  }
+  if (title) title.textContent = "Send receiver to Google Sheets";
 
   if (body) {
-    if (plan.action === "modify") {
-      body.textContent = `The receiver will update the existing tab "${plan.targetTab}" in the selected Google Sheet.`;
-    } else {
-      body.textContent = `A new tab named "${plan.targetTab}" will be created from the active Excel worksheet.`;
-    }
+    body.textContent =
+      "This will update Master Receivers and log the upload in the RECEIVER RECORDS tab " +
+      "(Receiver #, PO#, Purchase From, Date Received, Date Uploaded). " +
+      "If this receiver already exists in RECEIVER RECORDS (same RR# + same month/day), Date Uploaded will be refreshed.";
   }
 
-  if (modal) {
-    modal.classList.remove("hidden");
-  }
+  if (modal) modal.classList.remove("hidden");
 }
 
 function closeActionModal() {
@@ -319,30 +336,39 @@ async function confirmPendingSend() {
 
   sendInFlight = true;
   setButtonEnabled($("create_send"), false);
-  setGlobalLoading(true, plan.action === "modify" ? "Updating workspace in Google Sheets…" : "Creating workspace in Google Sheets…");
+  setGlobalLoading(true, "Sending receiver to Google Sheets…");
   setStatus("Sending to Google Sheets…");
 
   try {
-    const valuesMap = buildValuesMapFromUI();
+    // 1) Determine whether this receiver already exists in RECEIVER RECORDS (RR# + month/day)
+    const rrResult = buildReceiverRecordPayloadFromUI();
+    if (rrResult.error) throw new Error(rrResult.error);
 
-    let targetTab = plan.targetTab;
-    if (plan.action === "create") {
-      const templateName = "CMX METAL NEW TEMPLATE";
-      const cr = await fetch(`${BACKEND}/api/createTab`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sheetId: selectedSheetId, templateName, newName: plan.targetTab })
+    let recordExists = false;
+    try {
+      const qs = new URLSearchParams({
+        sheetId: selectedSheetId,
+        rrNumber: rrResult.payload.rrNumber,
+        dateReceived: rrResult.payload.dateReceived
       });
-      if (!cr.ok) throw new Error("createTab failed: " + cr.status);
+      const stRes = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, {
+        credentials: "include"
+      });
+      if (stRes.ok) {
+        const stJson = await stRes.json();
+        recordExists = !!stJson.exists;
+      }
+    } catch (e) {
+      // Non-fatal: we'll still upsert the record
+      console.warn("receiverRecordStatus failed:", e);
     }
 
-    await writeFieldsToTab(selectedSheetId, targetTab, valuesMap);
-
+    // 2) Update Master Receivers (existing logic stays the same)
     const masterResult = buildMasterPayloadFromUI();
-    if (masterResult.error) {
-      throw new Error(masterResult.error);
-    }
+    if (masterResult.error) throw new Error(masterResult.error);
+
+    let masterUpdated = false;
+    let masterFailStatus = null;
 
     if (masterResult.payload) {
       try {
@@ -352,31 +378,32 @@ async function confirmPendingSend() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(masterResult.payload)
         });
-        if (!mrRes.ok) {
-          console.warn("updateMasterFromReceiver failed:", mrRes.status);
-          setStatus(
-            `${plan.action === "modify" ? "Workspace updated" : "Workspace created"}, but Master Receivers update failed (` +
-            mrRes.status +
-            ")."
-          );
-        } else {
-          setStatus(
-            plan.action === "modify"
-              ? `Done: updated workspace and Master Receivers for tab "${targetTab}".`
-              : "Done: created workspace and updated Master Receivers."
-          );
-        }
+        masterUpdated = mrRes.ok;
+        if (!mrRes.ok) masterFailStatus = mrRes.status;
       } catch (e) {
+        masterUpdated = false;
+        masterFailStatus = e.message || String(e);
         console.warn("updateMasterFromReceiver error:", e);
-        setStatus(
-          `${plan.action === "modify" ? "Workspace updated" : "Workspace created"}, but Master Receivers update errored: ` +
-          (e.message || e)
-        );
       }
+    }
+
+    // 3) Upsert RECEIVER RECORDS row (server stamps Date Uploaded)
+    const rrUpRes = await fetch(`${BACKEND}/api/upsertReceiverRecord`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(rrResult.payload)
+    });
+    if (!rrUpRes.ok) throw new Error("Receiver Records update failed: " + rrUpRes.status);
+
+    const modeText = recordExists ? "updated existing upload record" : "created new upload record";
+
+    if (!masterResult.payload) {
+      setStatus(`Done: ${modeText}. (Master not updated: missing RR#/PO#/lines.)`);
+    } else if (!masterUpdated) {
+      setStatus(`Done: ${modeText}, but Master Receivers update failed (${masterFailStatus}).`);
     } else {
-      setStatus(
-        `${plan.action === "modify" ? "Workspace updated" : "Workspace created"} (Master not updated: missing RR#/PO#/lines).`
-      );
+      setStatus(`Done: ${modeText} and updated Master Receivers.`);
     }
 
     await onSheetSelected();
@@ -391,7 +418,6 @@ async function confirmPendingSend() {
 }
 
 
-// ----------------- BUTTON STATE / LOCK-OUT LOGIC -----------------
 
 function refreshSendButtonsState() {
   let sendEnabled = false;

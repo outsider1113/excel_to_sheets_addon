@@ -316,76 +316,84 @@ function updateCreateWorkspaceNameFromActive(activeName) {
 // ----------------- WORKSPACE STATE / WARNINGS -----------------
 
 async function evaluateWorkspaceState() {
-  const activeName = currentActiveWorksheet ||
+  const activeName =
+    currentActiveWorksheet ||
     ($("activeSheetName") ? $("activeSheetName").textContent : "");
+
   const identifier = extractIdentifierFromName(activeName);
-  workspaceState = { type: "unknown", identifier: null, matchedTab: null };
+  workspaceState = { type: "unknown", identifier: identifier || null, matchedTab: null };
+
+  // Prefer the actual Receiver / PO values (these are what get written to RECEIVER RECORDS)
+  const rrFromUI = ($("c_rcv") && $("c_rcv").value ? $("c_rcv").value : "").trim();
+  const poFromUI = ($("c_po") && $("c_po").value ? $("c_po").value : "").trim();
+  const dateFromUI = ($("c_dr") && $("c_dr").value ? $("c_dr").value : "").trim();
 
   if (!activeName) {
     workspaceState.type = "unknown";
     return;
   }
 
+  // If we have RR + PO + a selected sheet, we can *directly* determine Create vs Modify by checking RECEIVER RECORDS.
+  if (selectedSheetId && rrFromUI && poFromUI) {
+    try {
+      const qs = new URLSearchParams({
+        sheetId: selectedSheetId,
+        rrNumber: rrFromUI,
+        poNumber: poFromUI
+      });
+      if (dateFromUI) qs.set("dateReceived", dateFromUI);
+
+      const stRes = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, {
+        credentials: "include"
+      });
+
+      if (stRes.ok) {
+        const stJson = await stRes.json();
+        if (stJson && stJson.exists) {
+          workspaceState.type = "existing";
+          workspaceState.matchedTab = "RECEIVER RECORDS";
+          return;
+        }
+        workspaceState.type = "new-valid";
+        workspaceState.matchedTab = null;
+        return;
+      }
+
+      // Non-fatal: if check fails, allow send pipeline to proceed (it will still upsert receiver record).
+      workspaceState.type = "new-valid";
+      workspaceState.matchedTab = null;
+      return;
+    } catch (e) {
+      console.warn("receiverRecordStatus check failed:", e);
+      workspaceState.type = "new-valid";
+      workspaceState.matchedTab = null;
+      return;
+    }
+  }
+
+  // If we don't have RR+PO yet, we cannot accurately check RECEIVER RECORDS.
+  // We still keep the title identifier validation as a *hint* and a guardrail,
+  // but we don't force Create/Modify until RR+PO are present.
   if (!identifier) {
-    // title doesn't contain -MM-DD-XXX at the end (dash may be followed by a space)
     workspaceState.type = "title-invalid";
     workspaceState.identifier = null;
+
     if (selectedSheetId) {
       setStatus(
         "Active Excel tab name does not contain -MM-DD-XXX identifier (e.g. NOVA -1-17-025 or NOVA - 1-17-025). " +
-        "You can read values, but Send is disabled until the tab title is fixed."
+        "Read the receiver to fill Receiver # and PO#, or rename the tab. " +
+        "Send is disabled until Receiver # + PO# are present."
       );
     }
     return;
   }
 
+  // We have an identifier but still lack RR+PO, so we can't check RECEIVER RECORDS.
+  workspaceState.type = "needs-read";
   workspaceState.identifier = identifier;
-
-  // IMPORTANT CHANGE:
-  // We no longer create a 1:1 receiver copy tab in Google Sheets.
-  // Create vs Modify is determined by looking up (Receiver # + month/day) in the RECEIVER RECORDS tab.
-  if (!selectedSheetId) {
-    workspaceState.type = "unknown";
-    return;
-  }
-
-  // identifier looks like "-M-D-XXX" (from the Excel tab name)
-  const parts = identifier.split("-");
-  // parts: ["", M, D, XXX]
-  const mm = String(parts[1] || "").trim().padStart(2, "0");
-  const dd = String(parts[2] || "").trim().padStart(2, "0");
-  const rr = String(parts[3] || "").trim();
-
-  // We only need month/day for the receiver-record match.
-  const dateReceivedMD = `${mm}/${dd}`;
-
-  try {
-    const qs = new URLSearchParams({
-      sheetId: selectedSheetId,
-      rrNumber: rr,
-      dateReceived: dateReceivedMD
-    });
-
-    const res = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, {
-      credentials: "include"
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      workspaceState.type = (data && data.exists) ? "existing" : "new-valid";
-      workspaceState.matchedTab = null;
-      return;
-    }
-
-    // If the record check fails, default to "new-valid" but keep send enabled.
-    workspaceState.type = "new-valid";
-    workspaceState.matchedTab = null;
-  } catch (e) {
-    console.warn("receiverRecordStatus check failed:", e);
-    workspaceState.type = "new-valid";
-    workspaceState.matchedTab = null;
-  }
+  workspaceState.matchedTab = null;
 }
+
 
 // extract identifier -MM-DD-XXX from name
 function extractIdentifierFromName(name) {
@@ -506,7 +514,7 @@ function updateModeBanner() {
     banner.className = "mode-banner invalid";
     labelEl.textContent = "Mode";
     textEl.textContent =
-      "Cannot send yet. Rename the Excel tab to include -MM-DD-XXX.";
+      "Cannot determine mode yet. Fill Receiver # and PO# (or rename the tab to include -MM-DD-XXX).";
   } else if (workspaceState.type === "existing") {
     banner.className = "mode-banner modify";
     labelEl.textContent = "Modifying";
@@ -516,7 +524,12 @@ function updateModeBanner() {
     banner.className = "mode-banner create";
     labelEl.textContent = "Creating";
     textEl.textContent =
-      'Receiver not found in "RECEIVER RECORDS". Will create a new upload record, then update Master Receivers.';
+      'Receiver not found in "RECEIVER RECORDS" (Receiver # + PO#). Will create a new upload record, then update Master Receivers.';
+  } else if (workspaceState.type === "needs-read") {
+    banner.className = "mode-banner";
+    labelEl.textContent = "Mode";
+    textEl.textContent =
+      "Read the receiver (Receiver # + PO#) to determine Creating vs Modifying.";
   } else {
     banner.className = "mode-banner";
     labelEl.textContent = "Mode";

@@ -349,8 +349,9 @@ async function confirmPendingSend() {
       const qs = new URLSearchParams({
         sheetId: selectedSheetId,
         rrNumber: rrResult.payload.rrNumber,
-        dateReceived: rrResult.payload.dateReceived
+        poNumber: rrResult.payload.poNumber
       });
+      if (rrResult.payload.dateReceived) qs.set("dateReceived", rrResult.payload.dateReceived);
       const stRes = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, {
         credentials: "include"
       });
@@ -406,6 +407,7 @@ async function confirmPendingSend() {
       setStatus(`Done: ${modeText} and updated Master Receivers.`);
     }
 
+    await new Promise(r => setTimeout(r, 250));
     await onSheetSelected();
   } catch (err) {
     console.error(err);
@@ -454,7 +456,8 @@ function refreshSendButtonsState() {
 
   if (!sendInFlight &&
       selectedSheetId &&
-      workspaceState.type !== "title-invalid" &&
+      // Title can be invalid, but we can still send once Receiver # + PO# are present.
+      (workspaceState.type !== "title-invalid" || ((($("c_rcv") && $("c_rcv").value) || "").trim() && (($("c_po") && $("c_po").value) || "").trim())) &&
       nameValid &&
       hasAnyCreateData() &&
       !needsResync &&

@@ -113,6 +113,20 @@ let workspaceState = {
   identifier: null,     // -MM-DD-XXX extracted from Excel
   matchedTab: null      // tab title in Sheets (if any)
 };
+// Throttle expensive server checks (prevents Sheets API read quota bursts)
+const RECEIVER_STATUS_TTL_MS = 30 * 1000;          // cache /api/receiverRecordStatus result
+const WORKSPACE_EVAL_MIN_INTERVAL_MS = 10 * 1000;  // don't re-evaluate every 2s poll unless inputs/tab changed
+let _rrStatusCache = { key: null, at: 0, exists: null };
+let _rrStatusInFlight = null;
+let _lastWorkspaceEvalKey = null;
+let _lastWorkspaceEvalAt = 0;
+
+function invalidateReceiverRecordStatusCache_() {
+  _rrStatusCache = { key: null, at: 0, exists: null };
+  _rrStatusInFlight = null;
+  _lastWorkspaceEvalAt = 0; // allow immediate re-eval
+}
+
 
 let createInFlight = false;
 let sendInFlight = false;
@@ -293,7 +307,22 @@ async function detectActiveWorksheet(forceOverlay = false) {
       updateCreateWorkspaceNameFromActive(currentName);
 
       // Re-evaluate workspace existence and warnings on each poll
-      await evaluateWorkspaceState();
+      // Re-evaluate sparingly (prevents backend/Snapshot reminders from hammering Sheets)
+      const rrVal = (document.getElementById("receiverNumber")?.value || "").trim();
+      const poVal = (document.getElementById("poNumber")?.value || "").trim();
+      const dtVal = (document.getElementById("receiverDate")?.value || "").trim();
+      const evalKey = `${currentName}|${selectedSheetId || ""}|${rrVal}|${poVal}|${dtVal}`;
+      const now = Date.now();
+
+      const keyChanged = evalKey !== _lastWorkspaceEvalKey;
+      const timeOk = (now - _lastWorkspaceEvalAt) >= WORKSPACE_EVAL_MIN_INTERVAL_MS;
+
+      if (forceOverlay || tabChanged || keyChanged || timeOk) {
+        _lastWorkspaceEvalKey = evalKey;
+        _lastWorkspaceEvalAt = now;
+        await evaluateWorkspaceState();
+      }
+
       updateModeBanner();
       updateResyncWarning();
       refreshSendButtonsState();
@@ -335,39 +364,44 @@ async function evaluateWorkspaceState() {
 
   // If we have RR + PO + a selected sheet, we can *directly* determine Create vs Modify by checking RECEIVER RECORDS.
   if (selectedSheetId && rrFromUI && poFromUI) {
-    try {
-      const qs = new URLSearchParams({
-        sheetId: selectedSheetId,
-        rrNumber: rrFromUI,
-        poNumber: poFromUI
-      });
-      if (dateFromUI) qs.set("dateReceived", dateFromUI);
+    const key = `${selectedSheetId}|${rrFromUI}|${poFromUI}|${dateFromUI || ""}`;
+    const now = Date.now();
 
-      const stRes = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, {
-        credentials: "include"
-      });
+    // Cache + de-dupe in-flight requests to avoid hammering the backend (which then hammers Sheets)
+    if (_rrStatusCache.key === key && (now - _rrStatusCache.at) < RECEIVER_STATUS_TTL_MS && _rrStatusCache.exists !== null) {
+      receiverRecordExists = _rrStatusCache.exists;
+    } else {
+      try {
+        if (_rrStatusInFlight && _rrStatusInFlight.key === key) {
+          receiverRecordExists = await _rrStatusInFlight.promise;
+        } else {
+          const qs = new URLSearchParams({
+            sheetId: selectedSheetId,
+            receiverNumber: rrFromUI,
+            poNumber: poFromUI,
+            receiverDate: dateFromUI || ""
+          });
 
-      if (stRes.ok) {
-        const stJson = await stRes.json();
-        if (stJson && stJson.exists) {
-          workspaceState.type = "existing";
-          workspaceState.matchedTab = "RECEIVER RECORDS";
-          return;
+          _rrStatusInFlight = {
+            key,
+            promise: (async () => {
+              const stResp = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, { credentials: "include" });
+              const stJson = await stResp.json();
+              return !!stJson.exists;
+            })()
+          };
+
+          receiverRecordExists = await _rrStatusInFlight.promise;
         }
-        workspaceState.type = "new-valid";
-        workspaceState.matchedTab = null;
-        return;
-      }
 
-      // Non-fatal: if check fails, allow send pipeline to proceed (it will still upsert receiver record).
-      workspaceState.type = "new-valid";
-      workspaceState.matchedTab = null;
-      return;
-    } catch (e) {
-      console.warn("receiverRecordStatus check failed:", e);
-      workspaceState.type = "new-valid";
-      workspaceState.matchedTab = null;
-      return;
+        _rrStatusCache = { key, at: Date.now(), exists: receiverRecordExists };
+      } catch (e) {
+        // If the status check fails, don't block the UI; just treat as "not uploaded"
+        receiverRecordExists = false;
+        _rrStatusCache = { key: null, at: 0, exists: null };
+      } finally {
+        if (_rrStatusInFlight && _rrStatusInFlight.key === key) _rrStatusInFlight = null;
+      }
     }
   }
 

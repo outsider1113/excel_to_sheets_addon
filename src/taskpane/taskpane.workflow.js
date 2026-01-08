@@ -399,6 +399,14 @@ async function confirmPendingSend() {
 
     const modeText = recordExists ? "updated existing upload record" : "created new upload record";
 
+    // Keep UI state in sync immediately (and invalidate any cached status checks)
+    try {
+      workspaceState.receiverRecordExists = true;
+      if (typeof invalidateReceiverRecordStatusCache_ === "function") invalidateReceiverRecordStatusCache_();
+      if (typeof updateModeBanner === "function") updateModeBanner();
+      if (typeof refreshSendButtonsState === "function") refreshSendButtonsState();
+    } catch (_) {}
+
     if (!masterResult.payload) {
       setStatus(`Done: ${modeText}. (Master not updated: missing RR#/PO#/lines.)`);
     } else if (!masterUpdated) {

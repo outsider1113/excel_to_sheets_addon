@@ -84,6 +84,15 @@ async function readFieldsFromExcel_Create() {
         renderLineItems();
     });
 
+    // Now that header fields are populated, re-check RECEIVER RECORDS once (cached)
+    // so the Send button can enable immediately without waiting for the poller.
+    try {
+      await evaluateWorkspaceState();
+      updateModeBanner();
+    } catch (e) {
+      /* non-blocking */
+    }
+
     setStatus("Fields Copied From Excel. You Can Edit Them Before Sending.");
   } catch (err) {
     console.error(err);
@@ -117,13 +126,56 @@ function buildReceiverRecordPayloadFromUI() {
     return { payload: null, error: "Receiver # and Date Received are required to log RECEIVER RECORDS." };
   }
 
+  // Net Total = sum of (NET * PRICE) for valid line items (those with an item code)
+  // This is the same set of lines that will be uploaded to MASTER RECEIVERS.
+  function parseNumber(val) {
+    if (val == null) return null;
+    const s = String(val).replace(/,/g, "").trim();
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  let netTotal = 0;
+  let sawAny = false;
+  for (const li of createLineItems) {
+    if (!li) continue;
+    const hasAny =
+      (li.item && li.item.trim().length) ||
+      (li.com && li.com.trim().length) ||
+      (li.gross && li.gross.trim().length) ||
+      (li.tare && li.tare.trim().length) ||
+      (li.cost && li.cost.trim().length);
+
+    if (!hasAny) continue;
+
+    const itemCode = (li.item || "").trim();
+    if (!itemCode) continue; // only valid, coded line items
+
+    const gross = parseNumber(li.gross);
+    const tare  = parseNumber(li.tare);
+    const price = parseNumber(li.cost);
+
+    if (gross == null || tare == null || price == null) continue;
+
+    const net = gross - tare;
+    if (!Number.isFinite(net) || net <= 0) continue;
+
+    netTotal += (net * price);
+    sawAny = true;
+  }
+
+  // If we couldn't compute it reliably, send nothing and let server write a live SUMIF formula instead.
+  const netTotalOut = sawAny ? netTotal : null;
+
   return {
     payload: {
       sheetId: selectedSheetId,
       rrNumber,
       poNumber,
       purchaseFrom,
-      dateReceived
+      dateReceived,
+      netTotal: netTotalOut
     },
     error: null
   };

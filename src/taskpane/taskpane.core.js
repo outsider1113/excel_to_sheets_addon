@@ -114,9 +114,9 @@ let workspaceState = {
   matchedTab: null      // tab title in Sheets (if any)
 };
 // Throttle expensive server checks (prevents Sheets API read quota bursts)
-const RECEIVER_STATUS_TTL_MS = 30 * 1000;          // cache /api/receiverRecordStatus result
-const WORKSPACE_EVAL_MIN_INTERVAL_MS = 10 * 1000;  // don't re-evaluate every 2s poll unless inputs/tab changed
-let _rrStatusCache = { key: null, at: 0, exists: null };
+const RECEIVER_STATUS_TTL_MS = 60 * 1000;          // cache /api/receiverRecordStatus result
+const WORKSPACE_EVAL_MIN_INTERVAL_MS = 15 * 1000;  // don't re-evaluate every 2s poll unless inputs/tab changed
+let _rrStatusCache = { key: null, at: 0, exists: null, rowNumber: null };
 let _rrStatusInFlight = null;
 let _lastWorkspaceEvalKey = null;
 let _lastWorkspaceEvalAt = 0;
@@ -284,49 +284,61 @@ async function onSheetSelected() {
 
 async function detectActiveWorksheet(forceOverlay = false) {
   let showLoader = false;
+  let currentName = "";
+  let tabChanged = false;
+
   try {
+    // Keep Excel.run short: only read the active sheet name.
     await Excel.run(async (ctx) => {
       const ws = ctx.workbook.worksheets.getActiveWorksheet();
       ws.load("name");
       await ctx.sync();
+      currentName = ws.name || "";
+    });
 
-      const currentName = ws.name || "";
-      const tabChanged = currentName !== lastDetectedWorksheet;
-      if (forceOverlay || tabChanged) {
-        setGlobalLoading(true, "Updating for active Excel tab...");
-        showLoader = true;
-      }
+    tabChanged = currentName !== lastDetectedWorksheet;
+    if (forceOverlay || tabChanged) {
+      setGlobalLoading(true, "Updating for active Excel tab...");
+      showLoader = true;
+    }
 
-      currentActiveWorksheet = currentName;
-      lastDetectedWorksheet = currentName;
+    currentActiveWorksheet = currentName;
+    lastDetectedWorksheet = currentName;
 
-      const nameSpan = $("activeSheetName");
-      if (nameSpan) nameSpan.textContent = currentName;
+    const nameSpan = $("activeSheetName");
+    if (nameSpan) nameSpan.textContent = currentName;
 
-      // Always mirror active Excel tab into the workspace-name field
-      updateCreateWorkspaceNameFromActive(currentName);
+    // Always mirror active Excel tab into the workspace-name field
+    updateCreateWorkspaceNameFromActive(currentName);
 
-      // Re-evaluate workspace existence and warnings on each poll
-      // Re-evaluate sparingly (prevents backend/Snapshot reminders from hammering Sheets)
-      const rrVal = (document.getElementById("receiverNumber")?.value || "").trim();
-      const poVal = (document.getElementById("poNumber")?.value || "").trim();
-      const dtVal = (document.getElementById("receiverDate")?.value || "").trim();
-      const evalKey = `${currentName}|${selectedSheetId || ""}|${rrVal}|${poVal}|${dtVal}`;
-      const now = Date.now();
-
-      const keyChanged = evalKey !== _lastWorkspaceEvalKey;
-      const timeOk = (now - _lastWorkspaceEvalAt) >= WORKSPACE_EVAL_MIN_INTERVAL_MS;
-
-      if (forceOverlay || tabChanged || keyChanged || timeOk) {
-        _lastWorkspaceEvalKey = evalKey;
-        _lastWorkspaceEvalAt = now;
-        await evaluateWorkspaceState();
-      }
-
+    // Skip any backend checks until we're authenticated AND a Google Sheet is selected.
+    if (!lastAuthOk || !selectedSheetId) {
       updateModeBanner();
       updateResyncWarning();
-      refreshSendButtonsState();
-    });
+      if (typeof refreshSendButtonsState === "function") refreshSendButtonsState();
+      return;
+    }
+
+    // Re-evaluate workspace existence sparingly (prevents backend/Snapshot reminders from hammering Sheets)
+    const rrVal = ($("c_rcv") && $("c_rcv").value ? $("c_rcv").value : "").trim();
+    const poVal = ($("c_po") && $("c_po").value ? $("c_po").value : "").trim();
+    const dtVal = ($("c_dr") && $("c_dr").value ? $("c_dr").value : "").trim();
+
+    const evalKey = `${currentName}|${selectedSheetId || ""}|${rrVal}|${poVal}|${dtVal}`;
+    const now = Date.now();
+
+    const keyChanged = evalKey !== _lastWorkspaceEvalKey;
+    const timeOk = (now - _lastWorkspaceEvalAt) >= WORKSPACE_EVAL_MIN_INTERVAL_MS;
+
+    if (forceOverlay || tabChanged || keyChanged || timeOk) {
+      _lastWorkspaceEvalKey = evalKey;
+      _lastWorkspaceEvalAt = now;
+      await evaluateWorkspaceState();
+    }
+
+    updateModeBanner();
+    updateResyncWarning();
+    refreshSendButtonsState();
   } catch (err) {
     console.warn("detectActiveWorksheet error", err);
   } finally {
@@ -350,7 +362,13 @@ async function evaluateWorkspaceState() {
     ($("activeSheetName") ? $("activeSheetName").textContent : "");
 
   const identifier = extractIdentifierFromName(activeName);
-  workspaceState = { type: "unknown", identifier: identifier || null, matchedTab: null };
+  workspaceState = {
+    type: "unknown",        // "existing" | "new-valid" | "title-invalid" | "needs-read" | "unknown"
+    identifier: identifier || null,
+    matchedTab: null,
+    receiverRecordExists: null,
+    receiverRecordRow: null
+  };
 
   // Prefer the actual Receiver / PO values (these are what get written to RECEIVER RECORDS)
   const rrFromUI = ($("c_rcv") && $("c_rcv").value ? $("c_rcv").value : "").trim();
@@ -362,52 +380,68 @@ async function evaluateWorkspaceState() {
     return;
   }
 
-  // If we have RR + PO + a selected sheet, we can *directly* determine Create vs Modify by checking RECEIVER RECORDS.
+  // If we have RR + PO + a selected sheet, we can directly determine Create vs Modify
+  // by checking RECEIVER RECORDS (cached + de-duped).
   if (selectedSheetId && rrFromUI && poFromUI) {
     const key = `${selectedSheetId}|${rrFromUI}|${poFromUI}|${dateFromUI || ""}`;
     const now = Date.now();
 
-    // Cache + de-dupe in-flight requests to avoid hammering the backend (which then hammers Sheets)
-    if (_rrStatusCache.key === key && (now - _rrStatusCache.at) < RECEIVER_STATUS_TTL_MS && _rrStatusCache.exists !== null) {
-      receiverRecordExists = _rrStatusCache.exists;
+    let status = null;
+
+    if (
+      _rrStatusCache.key === key &&
+      (now - _rrStatusCache.at) < RECEIVER_STATUS_TTL_MS &&
+      _rrStatusCache.exists !== null
+    ) {
+      status = { exists: _rrStatusCache.exists, rowNumber: _rrStatusCache.rowNumber || null };
     } else {
       try {
         if (_rrStatusInFlight && _rrStatusInFlight.key === key) {
-          receiverRecordExists = await _rrStatusInFlight.promise;
+          status = await _rrStatusInFlight.promise;
         } else {
           const qs = new URLSearchParams({
             sheetId: selectedSheetId,
-            receiverNumber: rrFromUI,
+            rrNumber: rrFromUI,
             poNumber: poFromUI,
-            receiverDate: dateFromUI || ""
+            dateReceived: dateFromUI || ""
           });
 
           _rrStatusInFlight = {
             key,
             promise: (async () => {
               const stResp = await fetch(`${BACKEND}/api/receiverRecordStatus?${qs.toString()}`, { credentials: "include" });
-              const stJson = await stResp.json();
-              return !!stJson.exists;
+              const stJson = await stResp.json().catch(() => ({}));
+              return { exists: !!stJson.exists, rowNumber: stJson.rowNumber || null };
             })()
           };
 
-          receiverRecordExists = await _rrStatusInFlight.promise;
+          status = await _rrStatusInFlight.promise;
         }
 
-        _rrStatusCache = { key, at: Date.now(), exists: receiverRecordExists };
+        _rrStatusCache = {
+          key,
+          at: Date.now(),
+          exists: !!status.exists,
+          rowNumber: status.rowNumber || null
+        };
       } catch (e) {
-        // If the status check fails, don't block the UI; just treat as "not uploaded"
-        receiverRecordExists = false;
-        _rrStatusCache = { key: null, at: 0, exists: null };
+        // If the status check fails, don't block the UI; just treat as "not uploaded".
+        status = { exists: false, rowNumber: null };
+        _rrStatusCache = { key: null, at: 0, exists: null, rowNumber: null };
       } finally {
         if (_rrStatusInFlight && _rrStatusInFlight.key === key) _rrStatusInFlight = null;
       }
     }
+
+    workspaceState.receiverRecordExists = !!status.exists;
+    workspaceState.receiverRecordRow = status.rowNumber || null;
   }
 
-  // If we don't have RR+PO yet, we cannot accurately check RECEIVER RECORDS.
-  // We still keep the title identifier validation as a *hint* and a guardrail,
-  // but we don't force Create/Modify until RR+PO are present.
+  // Sheet tab hint (optional): show which tab title matches the identifier.
+  workspaceState.matchedTab = identifier ? findTabByIdentifier(identifier) : null;
+
+  // Guardrail: Excel tab must include the -MM-DD-XXX identifier.
+  // (Even though RR/PO drives Create vs Modify, this keeps your workflow consistent.)
   if (!identifier) {
     workspaceState.type = "title-invalid";
     workspaceState.identifier = null;
@@ -415,21 +449,24 @@ async function evaluateWorkspaceState() {
     if (selectedSheetId) {
       setStatus(
         "Active Excel tab name does not contain -MM-DD-XXX identifier (e.g. NOVA -1-17-025 or NOVA - 1-17-025). " +
-        "Read the receiver to fill Receiver # and PO#, or rename the tab. " +
-        "Send is disabled until Receiver # + PO# are present."
+        "Read the receiver to fill Receiver # and PO#, or rename the tab."
       );
     }
     return;
   }
 
-  // We have an identifier but still lack RR+PO, so we can't check RECEIVER RECORDS.
-  workspaceState.type = "needs-read";
-  workspaceState.identifier = identifier;
-  workspaceState.matchedTab = null;
+  // If we don't have RR+PO yet, we cannot accurately check RECEIVER RECORDS.
+  if (!rrFromUI || !poFromUI) {
+    workspaceState.type = "needs-read";
+    return;
+  }
+
+  // RR+PO present: decide Create vs Modify.
+  workspaceState.type = workspaceState.receiverRecordExists ? "existing" : "new-valid";
 }
 
 
-// extract identifier -MM-DD-XXX from name
+// extract identifier -MM-DD-XXX from name -MM-DD-XXX from name
 function extractIdentifierFromName(name) {
   if (!name || typeof name !== "string") return null;
   const m = name.match(ID_RE);

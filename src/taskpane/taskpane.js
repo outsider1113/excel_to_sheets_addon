@@ -41,6 +41,6 @@ Office.onReady(() => {
   detectActiveWorksheet(true).catch(err => console.warn("initial detect error", err));
   pollHandle = setInterval(
     () => detectActiveWorksheet().catch(err => console.warn("poll err", err)),
-    2000
+    4000
   );
 });

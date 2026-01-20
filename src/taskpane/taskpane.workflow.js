@@ -84,15 +84,6 @@ async function readFieldsFromExcel_Create() {
         renderLineItems();
     });
 
-    // Now that header fields are populated, re-check RECEIVER RECORDS once (cached)
-    // so the Send button can enable immediately without waiting for the poller.
-    try {
-      await evaluateWorkspaceState();
-      updateModeBanner();
-    } catch (e) {
-      /* non-blocking */
-    }
-
     setStatus("Fields Copied From Excel. You Can Edit Them Before Sending.");
   } catch (err) {
     console.error(err);
@@ -126,9 +117,10 @@ function buildReceiverRecordPayloadFromUI() {
     return { payload: null, error: "Receiver # and Date Received are required to log RECEIVER RECORDS." };
   }
 
-  // Net Total = sum of (NET * PRICE) for valid line items (those with an item code)
-  // This is the same set of lines that will be uploaded to MASTER RECEIVERS.
-  function parseNumber(val) {
+  // Net Total = sum of (NET * PRICE) for valid, coded line items.
+  // IMPORTANT (split-PO nuance): when TARE is blank, the receiver template often has NET entered
+  // directly in the GROSS cell. In that case, treat GROSS as NET.
+  function parseNumberOrNull(val) {
     if (val == null) return null;
     const s = String(val).replace(/,/g, "").trim();
     if (!s) return null;
@@ -138,34 +130,34 @@ function buildReceiverRecordPayloadFromUI() {
 
   let netTotal = 0;
   let sawAny = false;
+
   for (const li of createLineItems) {
     if (!li) continue;
+
     const hasAny =
       (li.item && li.item.trim().length) ||
       (li.com && li.com.trim().length) ||
       (li.gross && li.gross.trim().length) ||
       (li.tare && li.tare.trim().length) ||
       (li.cost && li.cost.trim().length);
-
     if (!hasAny) continue;
 
     const itemCode = (li.item || "").trim();
     if (!itemCode) continue; // only valid, coded line items
 
-    const gross = parseNumber(li.gross);
-    const tare  = parseNumber(li.tare);
-    const price = parseNumber(li.cost);
+    const gross = parseNumberOrNull(li.gross);
+    const tare  = parseNumberOrNull(li.tare);  // optional
+    const price = parseNumberOrNull(li.cost);
+    if (gross == null || price == null) continue;
 
-    if (gross == null || tare == null || price == null) continue;
-
-    const net = gross - tare;
+    const net = (tare == null) ? gross : (gross - tare);
     if (!Number.isFinite(net) || net <= 0) continue;
 
     netTotal += (net * price);
     sawAny = true;
   }
 
-  // If we couldn't compute it reliably, send nothing and let server write a live SUMIF formula instead.
+  // If we couldn't compute it reliably, send null and let the server write a live formula instead.
   const netTotalOut = sawAny ? netTotal : null;
 
   return {
@@ -236,7 +228,15 @@ function buildMasterPayloadFromUI() {
 
     const gross = parseNumber(li.gross);
     const tare  = parseNumber(li.tare);
-    const net   = (gross !== "" && tare !== "") ? (gross - tare) : "";
+
+    // SPLIT-PO nuance:
+    // When TARE is blank, users often enter NET directly in the GROSS cell.
+    // Treat blank TARE as "gross already equals net".
+    let net = "";
+    if (gross !== "") {
+      net = (tare === "") ? gross : (gross - tare);
+      if (!Number.isFinite(net) || net <= 0) net = "";
+    }
     const price = parseNumber(li.cost);
 
     // Per-line PO: use the inline PO# if present, otherwise fallback to header PO

@@ -1,4 +1,4 @@
-/* global Office Excel */
+/* global Office, Excel */
 /*
   Main entrypoint:
   - wires up DOM events in Office.onReady
@@ -6,37 +6,33 @@
   - routes send button to review modal handled in workflow.js
 */
 
+let excelEventsRegistered = false;
+
 function debounce_(fn, waitMs) {
   let t = null;
-  return (...args) => {
+  return function (...args) {
     if (t) clearTimeout(t);
-    t = setTimeout(() => fn(...args), waitMs);
+    t = setTimeout(() => fn.apply(this, args), waitMs);
   };
 }
 
-async function tryRegisterWorksheetActivatedEvent_() {
-  // Prefer event-driven updates. If event registration fails (host quirks),
-  // we fall back to a very slow poll as a safety net.
+async function registerExcelTabEvents_() {
+  if (excelEventsRegistered) return;
   try {
     await Excel.run(async (ctx) => {
-      ctx.workbook.worksheets.onActivated.add(async () => {
-        try {
-          await detectActiveWorksheet(true);
-          refreshSendButtonsState();
-        } catch (e) {
-          console.warn("onActivated handler error", e);
-        }
+      // Fires when user changes the active worksheet (tab switch)
+      ctx.workbook.worksheets.onActivated.add(() => {
+        detectActiveWorksheet(true).catch(err => console.warn("tab activated detect error", err));
       });
       await ctx.sync();
     });
-    return true;
-  } catch (e) {
-    console.warn("Failed to register worksheet activation event; using fallback poll", e);
-    return false;
+    excelEventsRegistered = true;
+  } catch (err) {
+    console.warn("Worksheet activation event not available; rely on manual refresh + key events", err);
   }
 }
 
-Office.onReady(async () => {
+Office.onReady(() => {
   // auth
   $("googleSignInBtn").addEventListener("click", openAuthDialog);
   $("verifyAuthBtn").addEventListener("click", verifyAuth);
@@ -51,20 +47,17 @@ Office.onReady(async () => {
   $("create_add_line").addEventListener("click", () => addLineItem());
   $("create_workspace_name").addEventListener("input", refreshSendButtonsState);
 
-  // Key fields: change-driven status refresh (no constant polling)
-  const onKeyFieldsChanged = debounce_(async () => {
-    try {
-      invalidateReceiverRecordStatusCache_();
-      await evaluateWorkspaceState();
-      refreshSendButtonsState();
-    } catch (e) {
-      console.warn("key fields refresh error", e);
-    }
-  }, 350);
-
+  // Key fields affect Create vs Modify; re-evaluate on change (no constant polling)
+  const onKeyChange = debounce_(async () => {
+    invalidateReceiverRecordStatusCache_();
+    await evaluateWorkspaceState();
+    updateModeBanner();
+    updateResyncWarning();
+    refreshSendButtonsState();
+  }, 250);
   ["c_rcv", "c_po", "c_dr"].forEach(id => {
     const el = $(id);
-    if (el) el.addEventListener("input", onKeyFieldsChanged);
+    if (el) el.addEventListener("input", onKeyChange);
   });
 
   // modal actions
@@ -83,15 +76,8 @@ Office.onReady(async () => {
   hide($("mainContent"));
   setStatus("Please sign in to continue.");
 
-  // initial detect
-  await detectActiveWorksheet(true).catch(err => console.warn("initial detect error", err));
-
-  // Event-driven updates preferred; fallback poll only if the event can't be registered.
-  const ok = await tryRegisterWorksheetActivatedEvent_();
-  if (!ok) {
-    pollHandle = setInterval(
-      () => detectActiveWorksheet().catch(err => console.warn("fallback poll err", err)),
-      15000
-    );
-  }
+  // initial detect + register tab-change handler (no constant polling)
+  registerExcelTabEvents_()
+    .then(() => detectActiveWorksheet(true))
+    .catch(err => console.warn("initial detect error", err));
 });

@@ -113,6 +113,9 @@ let workspaceState = {
   identifier: null,     // -MM-DD-XXX extracted from Excel
   matchedTab: null      // tab title in Sheets (if any)
 };
+
+// Whether this RR# + PO# already exists in RECEIVER RECORDS (determines Create vs Modify)
+let receiverRecordExists = null;
 // Throttle expensive server checks (prevents Sheets API read quota bursts)
 const RECEIVER_STATUS_TTL_MS = 30 * 1000;          // cache /api/receiverRecordStatus result
 const WORKSPACE_EVAL_MIN_INTERVAL_MS = 10 * 1000;  // don't re-evaluate every 2s poll unless inputs/tab changed
@@ -362,7 +365,8 @@ async function evaluateWorkspaceState() {
     return;
   }
 
-  // If we have RR + PO + a selected sheet, we can *directly* determine Create vs Modify by checking RECEIVER RECORDS.
+  // If we have RR + PO + a selected sheet, we can *directly* determine Create vs Modify
+  // by checking RECEIVER RECORDS (this is the source of truth).
   if (selectedSheetId && rrFromUI && poFromUI) {
     const key = `${selectedSheetId}|${rrFromUI}|${poFromUI}|${dateFromUI || ""}`;
     const now = Date.now();
@@ -377,10 +381,10 @@ async function evaluateWorkspaceState() {
         } else {
           const qs = new URLSearchParams({
             sheetId: selectedSheetId,
-            receiverNumber: rrFromUI,
-            poNumber: poFromUI,
-            receiverDate: dateFromUI || ""
+            rrNumber: rrFromUI,
+            poNumber: poFromUI
           });
+          if (dateFromUI) qs.set("dateReceived", dateFromUI);
 
           _rrStatusInFlight = {
             key,
@@ -403,11 +407,16 @@ async function evaluateWorkspaceState() {
         if (_rrStatusInFlight && _rrStatusInFlight.key === key) _rrStatusInFlight = null;
       }
     }
+
+    // We have enough information to set the mode.
+    workspaceState.type = receiverRecordExists ? "existing" : "new-valid";
+    workspaceState.identifier = identifier || null;
+    workspaceState.matchedTab = identifier ? findTabByIdentifier(identifier) : null;
+    return;
   }
 
   // If we don't have RR+PO yet, we cannot accurately check RECEIVER RECORDS.
-  // We still keep the title identifier validation as a *hint* and a guardrail,
-  // but we don't force Create/Modify until RR+PO are present.
+  // Title identifier is just a hint/guardrail until the receiver is read.
   if (!identifier) {
     workspaceState.type = "title-invalid";
     workspaceState.identifier = null;
@@ -425,7 +434,7 @@ async function evaluateWorkspaceState() {
   // We have an identifier but still lack RR+PO, so we can't check RECEIVER RECORDS.
   workspaceState.type = "needs-read";
   workspaceState.identifier = identifier;
-  workspaceState.matchedTab = null;
+  workspaceState.matchedTab = findTabByIdentifier(identifier);
 }
 
 
@@ -604,63 +613,43 @@ function updateResyncWarning() {
 function addLineItem() {
   createLineItems.push({ item: "", com: "", gross: "", tare: "", cost: "" });
   renderLineItems();
+  updateNetTotalDisplay();
   refreshSendButtonsState();
 }
 
-function _parseNumForUi_(val) {
-  if (val == null) return null;
-  const s = String(val).replace(/[$,]/g, "").trim();
-  if (!s) return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+// Derived net weight for UI (handles split-PO receivers where tare is blank)
+function computeNetWeightForLine_(li) {
+  const g = (li && li.gross != null) ? String(li.gross).trim() : "";
+  const t = (li && li.tare != null) ? String(li.tare).trim() : "";
+
+  const gNum = Number(g);
+  const tNum = Number(t);
+  if (g === "" || isNaN(gNum)) return "";
+
+  // If tare is blank, treat gross as the net weight (common on split-PO rows)
+  if (t === "" || isNaN(tNum)) return gNum;
+
+  return gNum - tNum;
 }
 
-function _formatMoney_(n) {
-  if (!Number.isFinite(n)) return "";
-  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function _formatWeight_(n) {
-  if (!Number.isFinite(n)) return "";
-  // Weight is usually whole lbs, but allow decimals if present
-  const isInt = Math.abs(n - Math.round(n)) < 1e-9;
-  return isInt
-    ? Math.round(n).toLocaleString()
-    : n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function _computeNetWeight_(grossStr, tareStr) {
-  const gross = _parseNumForUi_(grossStr);
-  const tare = _parseNumForUi_(tareStr);
-  if (gross == null) return null;
-  // Split-PO nuance: blank tare means "gross already equals net"
-  const net = (tare == null) ? gross : (gross - tare);
-  if (!Number.isFinite(net) || net <= 0) return null;
-  return net;
-}
-
-function updateNetTotalDisplay_() {
-  const box = $("create_net_total");
-  if (!box) return;
+function updateNetTotalDisplay() {
+  const valEl = $("netTotalValue");
+  if (!valEl) return;
 
   let total = 0;
-  let sawAny = false;
+  createLineItems.forEach(li => {
+    const net = computeNetWeightForLine_(li);
+    const c = (li && li.cost != null) ? String(li.cost).trim() : "";
+    const costNum = Number(c);
+    if (net === "" || isNaN(costNum)) return;
+    total += Number(net) * costNum;
+  });
 
-  for (const li of (createLineItems || [])) {
-    if (!li) continue;
-
-    const itemCode = String(li.item || "").trim();
-    if (!itemCode) continue; // match Receiver Records logic: coded lines only
-
-    const net = _computeNetWeight_(li.gross, li.tare);
-    const price = _parseNumForUi_(li.cost);
-    if (net == null || price == null) continue;
-
-    total += (net * price);
-    sawAny = true;
+  try {
+    valEl.textContent = total.toLocaleString(undefined, { style: "currency", currency: "USD" });
+  } catch (_) {
+    valEl.textContent = "$" + total.toFixed(2);
   }
-
-  box.value = sawAny ? _formatMoney_(total) : "";
 }
 
 function renderLineItems() {
@@ -683,65 +672,46 @@ function renderLineItems() {
     row.className = "line-item-row";
     row.dataset.index = String(idx);
 
-    // ITEM
-    const itemInput = document.createElement("input");
-    itemInput.value = li.item || "";
-    itemInput.addEventListener("input", () => {
-      li.item = itemInput.value;
-      updateNetTotalDisplay_();
-      refreshSendButtonsState();
+    LINE_KEYS.forEach(key => {
+      const input = document.createElement("input");
+      input.value = li[key] || "";
+      input.classList.add(`li-${key}`);
+
+      if (key === "gross" || key === "tare" || key === "cost") {
+        input.classList.add("li-num");
+      }
+
+      input.addEventListener("input", () => {
+        li[key] = input.value;
+        // Update derived fields in real-time
+        if (key === "gross" || key === "tare" || key === "cost") {
+          // Net is derived from gross/tare; recompute if either changes
+          if (netInput) {
+            const nw = computeNetWeightForLine_(li);
+            netInput.value = (nw === "" ? "" : String(nw));
+          }
+          updateNetTotalDisplay();
+        }
+        refreshSendButtonsState();
+      });
+
+      // Insert NET column after TARE
+      if (key === "tare") {
+        row.appendChild(input);
+
+        // Derived NET field (readonly)
+        var netInput = document.createElement("input");
+        const nw = computeNetWeightForLine_(li);
+        netInput.value = (nw === "" ? "" : String(nw));
+        netInput.readOnly = true;
+        netInput.classList.add("li-net");
+        row.appendChild(netInput);
+
+        return; // continue to next key
+      }
+
+      row.appendChild(input);
     });
-    row.appendChild(itemInput);
-
-    // COMMODITY
-    const comInput = document.createElement("input");
-    comInput.value = li.com || "";
-    comInput.addEventListener("input", () => {
-      li.com = comInput.value;
-      refreshSendButtonsState();
-    });
-    row.appendChild(comInput);
-
-    // GROSS
-    const grossInput = document.createElement("input");
-    grossInput.value = li.gross || "";
-    row.appendChild(grossInput);
-
-    // TARE
-    const tareInput = document.createElement("input");
-    tareInput.value = li.tare || "";
-    row.appendChild(tareInput);
-
-    // NET (read-only)
-    const netInput = document.createElement("input");
-    netInput.className = "net-readonly";
-    netInput.readOnly = true;
-    row.appendChild(netInput);
-
-    function recalc_() {
-      li.gross = grossInput.value;
-      li.tare = tareInput.value;
-      const net = _computeNetWeight_(li.gross, li.tare);
-      netInput.value = net == null ? "" : _formatWeight_(net);
-      updateNetTotalDisplay_();
-      refreshSendButtonsState();
-    }
-
-    grossInput.addEventListener("input", recalc_);
-    tareInput.addEventListener("input", recalc_);
-
-    // COST
-    const costInput = document.createElement("input");
-    costInput.value = li.cost || "";
-    costInput.addEventListener("input", () => {
-      li.cost = costInput.value;
-      updateNetTotalDisplay_();
-      refreshSendButtonsState();
-    });
-    row.appendChild(costInput);
-
-    // Set derived fields once on initial render
-    recalc_();
 
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
@@ -750,6 +720,7 @@ function renderLineItems() {
     removeBtn.addEventListener("click", () => {
       items.splice(idx, 1);
       renderLineItems();
+      updateNetTotalDisplay();
       refreshSendButtonsState();
     });
     row.appendChild(removeBtn);
@@ -757,8 +728,7 @@ function renderLineItems() {
     container.appendChild(row);
   });
 
-  // Update totals whenever we re-render.
-  updateNetTotalDisplay_();
+  updateNetTotalDisplay();
 }
 
 // ----------------- BUILD VALUES MAP FROM UI -----------------

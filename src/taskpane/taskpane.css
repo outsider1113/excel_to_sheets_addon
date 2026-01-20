@@ -330,52 +330,38 @@ input {
   font-size: 12px;
 }
 
-.line-item-row input.net-readonly {
-  background: #eef3ff;
-  border-color: #c7d2fe;
-  font-weight: 600;
+/* numeric alignment helpers */
+.line-item-row input.li-num {
   text-align: right;
 }
 
-/* Totals bar below line items */
-.totals-bar {
+/* NET is a derived value; keep it left-aligned for readability */
+.line-item-row input.li-net {
+  text-align: left;
+  background: #ffffff;
+}
+
+/* Total Net Price panel */
+.net-total-panel {
   margin-top: 10px;
-  display: flex;
-  justify-content: center;
-}
-
-.totals-box {
-  width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
   padding: 10px 12px;
-  border-radius: 10px;
-  background: #0f172a;
-  color: #ffffff;
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.22);
   text-align: center;
+  background: #ffffff;
 }
 
-.totals-label {
-  font-size: 11px;
-  letter-spacing: 0.06em;
+.net-total-label {
+  font-size: 12px;
+  opacity: 0.75;
   text-transform: uppercase;
-  opacity: 0.85;
-  margin-bottom: 6px;
+  letter-spacing: 0.04em;
 }
 
-.totals-input {
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.18);
-  background: rgba(255,255,255,0.08);
-  color: #ffffff;
+.net-total-value {
+  margin-top: 6px;
   font-size: 18px;
   font-weight: 700;
-  text-align: center;
-}
-
-.totals-input:focus {
-  outline: none;
 }
 
 .line-item-row button {

@@ -81,19 +81,10 @@ async function readFieldsFromExcel_Create() {
         }
       }
 
-	        renderLineItems();
+        renderLineItems();
     });
 
-	    // Reading sets RR#/PO#/Date programmatically (no input events fire), so explicitly
-	    // refresh mode + button state.
-	    currentActiveWorksheet = lastReadCreateSheetName || currentActiveWorksheet;
-	    const asn = $("activeSheetName");
-	    if (asn && currentActiveWorksheet) asn.textContent = currentActiveWorksheet;
-	    invalidateReceiverRecordStatusCache_();
-	    await evaluateWorkspaceState();
-	    updateModeBanner();
-
-	    setStatus("Fields Copied From Excel. You Can Edit Them Before Sending.");
+    setStatus("Fields Copied From Excel. You Can Edit Them Before Sending.");
   } catch (err) {
     console.error(err);
     setStatus("Failed to read Excel fields: " + (err.message || err));
@@ -126,13 +117,58 @@ function buildReceiverRecordPayloadFromUI() {
     return { payload: null, error: "Receiver # and Date Received are required to log RECEIVER RECORDS." };
   }
 
+  // Net Total = sum of (NET * PRICE) for valid, coded line items.
+  // IMPORTANT (split-PO nuance): when TARE is blank, the receiver template often has NET entered
+  // directly in the GROSS cell. In that case, treat GROSS as NET.
+  function parseNumberOrNull(val) {
+    if (val == null) return null;
+    // allow "$2.38", "1,234.5", etc.
+    const s = String(val).replace(/[^0-9.\-]/g, "").trim();
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  let netTotal = 0;
+  let sawAny = false;
+
+  for (const li of createLineItems) {
+    if (!li) continue;
+
+    const hasAny =
+      (li.item && li.item.trim().length) ||
+      (li.com && li.com.trim().length) ||
+      (li.gross && li.gross.trim().length) ||
+      (li.tare && li.tare.trim().length) ||
+      (li.cost && li.cost.trim().length);
+    if (!hasAny) continue;
+
+    const itemCode = (li.item || "").trim();
+    if (!itemCode) continue; // only valid, coded line items
+
+    const gross = parseNumberOrNull(li.gross);
+    const tare  = parseNumberOrNull(li.tare);  // optional
+    const price = parseNumberOrNull(li.cost);
+    if (gross == null || price == null) continue;
+
+    const net = (tare == null) ? gross : (gross - tare);
+    if (!Number.isFinite(net) || net <= 0) continue;
+
+    netTotal += (net * price);
+    sawAny = true;
+  }
+
+  // If we couldn't compute it reliably, send null and let the server write a live formula instead.
+  const netTotalOut = sawAny ? Number(netTotal.toFixed(2)) : null;
+
   return {
     payload: {
       sheetId: selectedSheetId,
       rrNumber,
       poNumber,
       purchaseFrom,
-      dateReceived
+      dateReceived,
+      netTotal: netTotalOut
     },
     error: null
   };
@@ -164,7 +200,8 @@ function buildMasterPayloadFromUI() {
 
   function parseNumber(val) {
     if (val == null) return "";
-    const s = String(val).replace(/,/g, "").trim();
+    // allow "$2.38", "1,234.5", etc.
+    const s = String(val).replace(/[^0-9.\-]/g, "").trim();
     if (!s) return "";
     const n = Number(s);
     return Number.isFinite(n) ? n : "";
@@ -193,8 +230,15 @@ function buildMasterPayloadFromUI() {
 
     const gross = parseNumber(li.gross);
     const tare  = parseNumber(li.tare);
-    // Split-PO receivers often leave TARE blank on line items; in that case GROSS is already net.
-    const net   = (gross !== "" && tare !== "") ? (gross - tare) : (gross !== "" ? gross : "");
+
+    // SPLIT-PO nuance:
+    // When TARE is blank, users often enter NET directly in the GROSS cell.
+    // Treat blank TARE as "gross already equals net".
+    let net = "";
+    if (gross !== "") {
+      net = (tare === "") ? gross : (gross - tare);
+      if (!Number.isFinite(net) || net <= 0) net = "";
+    }
     const price = parseNumber(li.cost);
 
     // Per-line PO: use the inline PO# if present, otherwise fallback to header PO
